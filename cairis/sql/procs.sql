@@ -3902,6 +3902,18 @@ begin
 
   if compositeCount <= 0
   then
+	select 'tag',tg.name from goal g, goal_tag gtg, tag tg, environment_goal eg where eg.environment_id = environmentId and eg.goal_id = g.id and g.id = gtg.goal_id and gtg.goal_id = eg.goal_id and gtg.tag_id = tg.id
+    union
+    select 'goal',g.name from goal g, goal_tag gtg, tag tg, environment_goal eg where eg.environment_id = environmentId and eg.goal_id = g.id and g.id = gtg.goal_id and gtg.goal_id = eg.goal_id and gtg.tag_id = tg.id
+    union
+    select 'tag',tg.name from task t, task_tag ttg, tag tg, environment_task et where et.environment_id = environmentId and et.task_id = t.id and t.id = ttg.task_id and ttg.task_id = et.task_id and ttg.tag_id = tg.id
+    union
+    select 'task',t.name from task t, task_tag ttg, tag tg, environment_task et where et.environment_id = environmentId and et.task_id = t.id and t.id = ttg.task_id and ttg.task_id = et.task_id and ttg.tag_id = tg.id
+    union
+    select 'tag',tg.name from usecase u, usecase_tag utg, tag tg, environment_usecase eu where eu.environment_id = environmentId and eu.usecase_id = u.id and u.id = utg.usecase_id and utg.usecase_id = eu.usecase_id and utg.tag_id = tg.id
+    union
+    select 'usecase',u.name from usecase u, usecase_tag utg, tag tg, environment_usecase eu where eu.environment_id = environmentId and eu.usecase_id = u.id and u.id = utg.usecase_id and utg.usecase_id = eu.usecase_id and utg.tag_id = tg.id
+    union  
     select 'goal',g.name from goal g, environment_goal eg where eg.environment_id = environmentId and eg.goal_id = g.id
     union
     select 'requirement',r.name from requirement r, asset_requirement ar, environment_asset ea, asset a, goalrequirement_goalassociation ga where ea.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and ga.subgoal_id = r.id and ga.environment_id = ea.environment_id
@@ -4084,6 +4096,22 @@ begin
 
   if compositeCount <= 0
   then
+	select 'asset',a.name from asset a, asset_tag atg, tag tg, environment_asset ea where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = atg.asset_id and atg.asset_id = ea.asset_id and atg.tag_id = tg.id
+    union    
+    select 'tag',tg.name from asset a, asset_tag atg, tag tg, environment_asset ea where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = atg.asset_id and atg.asset_id = ea.asset_id and atg.tag_id = tg.id
+    union
+    select 'tag',tg.name from goal g, goal_tag gtg, tag tg, environment_goal eg where eg.environment_id = environmentId and eg.goal_id = g.id and g.id = gtg.goal_id and gtg.goal_id = eg.goal_id and gtg.tag_id = tg.id
+    union
+    select 'goal',g.name from goal g, goal_tag gtg, tag tg, environment_goal eg where eg.environment_id = environmentId and eg.goal_id = g.id and g.id = gtg.goal_id and gtg.goal_id = eg.goal_id and gtg.tag_id = tg.id
+    union
+    select 'tag',tg.name from task t, task_tag ttg, tag tg, environment_task et where et.environment_id = environmentId and et.task_id = t.id and t.id = ttg.task_id and ttg.task_id = et.task_id and ttg.tag_id = tg.id
+    union
+    select 'task',t.name from task t, task_tag ttg, tag tg, environment_task et where et.environment_id = environmentId and et.task_id = t.id and t.id = ttg.task_id and ttg.task_id = et.task_id and ttg.tag_id = tg.id
+    union
+    select 'tag',tg.name from usecase u, usecase_tag utg, tag tg, environment_usecase eu where eu.environment_id = environmentId and eu.usecase_id = u.id and u.id = utg.usecase_id and utg.usecase_id = eu.usecase_id and utg.tag_id = tg.id
+    union
+    select 'usecase',u.name from usecase u, usecase_tag utg, tag tg, environment_usecase eu where eu.environment_id = environmentId and eu.usecase_id = u.id and u.id = utg.usecase_id and utg.usecase_id = eu.usecase_id and utg.tag_id = tg.id
+    union
     select 'goal',g.name from goal g, goalrole_goalassociation gr where gr.environment_id = environmentId and gr.goal_id = g.id
     union
     select 'obstacle',g.name from obstacle g, obstaclerole_goalassociation gr where gr.environment_id = environmentId and gr.goal_id = g.id
@@ -4285,6 +4313,18 @@ begin
     select 'asset',a.name from asset a, task_asset ta where ta.environment_id = environmentId and ta.asset_id = a.id
     union
     select 'asset',a.name from asset a, usecase_asset ta where ta.environment_id = environmentId and ta.asset_id = a.id
+    union
+	select 'asset',a.name from asset a, asset_tag atg, tag tg, environment_asset ea where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = atg.asset_id and atg.asset_id = ea.asset_id and atg.tag_id = tg.id
+    union    
+    select 'tag',tg.name from asset a, asset_tag atg, tag tg, environment_asset ea where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = atg.asset_id and atg.asset_id = ea.asset_id and atg.tag_id = tg.id
+    union
+    select 'tag',tg.name from task t, task_tag ttg, tag tg, environment_task et where et.environment_id = environmentId and et.task_id = t.id and t.id = ttg.task_id and ttg.task_id = et.task_id and ttg.tag_id = tg.id
+    union
+    select 'task',t.name from task t, task_tag ttg, tag tg, environment_task et where et.environment_id = environmentId and et.task_id = t.id and t.id = ttg.task_id and ttg.task_id = et.task_id and ttg.tag_id = tg.id
+    union
+    select 'tag',tg.name from usecase u, usecase_tag utg, tag tg, environment_usecase eu where eu.environment_id = environmentId and eu.usecase_id = u.id and u.id = utg.usecase_id and utg.usecase_id = eu.usecase_id and utg.tag_id = tg.id
+    union
+    select 'usecase',u.name from usecase u, usecase_tag utg, tag tg, environment_usecase eu where eu.environment_id = environmentId and eu.usecase_id = u.id and u.id = utg.usecase_id and utg.usecase_id = eu.usecase_id and utg.tag_id = tg.id
     union
     select 'asset',a.name from asset a, asset_threat at, risk r, misusecase_risk mr where at.environment_id = environmentId and at.asset_id = a.id and at.threat_id = r.threat_id and r.id = mr.risk_id
     union
@@ -5351,6 +5391,12 @@ begin
   then
     select 'asset' from_objt,a.name from_name, 'threat' to_objt,t.name to_name from asset_threat at,asset a, threat t where at.environment_id = environmentId and at.asset_id = a.id and at.threat_id = t.id
     union
+	select 'tag' from_objt,t.name from_name, 'asset' to_objt,a.name to_name from asset_tag at,asset a, tag t, environment_asset ea where ea.environment_id = environmentId and ea.asset_id = a.id and at.asset_id = ea.asset_id and at.tag_id = t.id
+    union
+    select 'tag' from_objt, tg.name from_name, 'task' to_objt, t.name to_name from task_tag ttg, task t, tag tg, environment_task et where et.environment_id = environmentId and et.task_id = t.id and ttg.task_id = et.task_id and ttg.tag_id = tg.id
+    union
+    select 'tag' from_objt, tg.name from_name, 'risk' to_objt,r.name to_name from risk_tag rtg, risk r, tag tg, environment_risk er where er.environment_id = environmentId and er.id = r.id and rtg.risk_id = er.id and rtg.tag_id = tg.id
+    union
     select 'asset' from_objt,a.name from_name,'vulnerability' to_objt, v.name to_name from asset_vulnerability av, asset a, vulnerability v where av.environment_id = environmentId and av.vulnerability_id = v.id and  av.asset_id = a.id
     union
     select 'attacker' from_objt, a.name from_name, 'threat' to_objt, t.name to_name from threat_attacker ta, threat t, attacker a, environment_attacker ea, environment_threat et where ta.environment_id = environmentId and ta.attacker_id = a.id and ta.threat_id = t.id and ta.environment_id = ea.environment_id and ta.environment_id = et.environment_id and ea.environment_id = environmentId and et.environment_id = environmentId
@@ -5366,6 +5412,10 @@ begin
     select 'countermeasure' from_objt, c.name from_name, 'role' from_objt, r.name to_name from countermeasure_role cr, countermeasure c, role r where cr.environment_id = environmentId and cr.countermeasure_id = c.id and cr.role_id = r.id
     union
     select 'task' from_objt, t.name from_name, 'requirement' from_objt, r.name from_name from task t, requirement r, environment_task et,requirement_task tr, asset_requirement rmr, asset rm where et.environment_id = environmentId and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+	union
+    select 'task' from_objt, t.name from_name, 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name from task t, requirement r, environment_task et,requirement_task tr, environment_requirement rmr, environment rm where et.environment_id = environmentId and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    union
+    select 'risk' from_objt, r.name from_name, 'misusecase' to_objt, m.name to_name from risk r, misusecase m, misusecase_risk mr, environment_misusecase em where em.environment_id = environmentId and em.misusecase_id = mr.misusecase_id and mr.misusecase_id = m.id and mr.risk_id = r.id
     union
     select 'task' from_objt, t.name from_name, 'requirement' from_objt, r.name from_name from task t, requirement r, environment_task et,requirement_task tr, environment_requirement rmr, environment rm where et.environment_id = environmentId and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
     union 
@@ -5425,6 +5475,8 @@ begin
   else
     select 'asset' from_objt,a.name from_name, 'threat' to_objt,t.name to_name from asset_threat at,asset a, threat t where at.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.asset_id = a.id and at.threat_id = t.id
     union
+	select 'asset' from_objt,a.name from_name, 'tag' to_objt,t.name to_name from asset_tag at,asset a, tag t, environment_asset ea where ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ea.asset_id = a.id and at.asset_id = ea.asset_id and at.tag_id = t.id
+    union
     select 'asset' from_objt,a.name from_name,'vulnerability' to_objt, v.name to_name from asset_vulnerability av, asset a, vulnerability v where av.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.vulnerability_id = v.id and  av.asset_id = a.id
     union
     select 'attacker' from_objt, a.name from_name, 'threat' to_objt, t.name to_name from threat_attacker ta, threat t, attacker a, environment_attacker ea, environment_threat et where ta.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ta.attacker_id = a.id and ta.threat_id = t.id and ta.environment_id = ea.environment_id and ta.environment_id = et.environment_id and ea.environment_id = environmentId and et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
@@ -5440,6 +5492,10 @@ begin
     select 'countermeasure' from_objt, c.name from_name, 'role' from_objt, r.name to_name from countermeasure_role cr, countermeasure c, role r where cr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and cr.countermeasure_id = c.id and cr.role_id = r.id
     union
     select 'task' from_objt, t.name from_name, 'requirement' from_objt, r.name from_name from task t, requirement r, environment_task et,requirement_task tr, asset_requirement rmr, asset rm where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+	union
+    select 'task' from_objt, t.name from_name, 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name from task t, requirement r, environment_task et,requirement_task tr, environment_requirement rmr, environment rm where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    union
+    select 'risk' from_objt, r.name from_name, 'misusecase' to_objt, m.name to_name from risk r, misusecase m, misusecase_risk mr, environment_misusecase em where em.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and em.misusecase_id = mr.misusecase_id and mr.misusecase_id = m.id and mr.risk_id = r.id
     union
     select 'task' from_objt, t.name from_name, 'requirement' from_objt, r.name from_name from task t, requirement r, environment_task et,requirement_task tr, environment_requirement rmr, environment rm where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
     union 
@@ -7005,6 +7061,12 @@ begin
 
   if compositeCount <= 0
   then
+	select ttg.task_id id,e.name environment, tg.name goal_name,'tag' goal_dim,'accountable' ref_type, t.name subgoal_name,'task' subgoal_dim,'0' alternative_id, concat(tg.name,' accountable ',t.name) rationale from task_tag ttg, task t, tag tg, environment_task et, environment e where et.environment_id = environmentId and et.task_id = t.id and ttg.task_id = et.task_id and ttg.tag_id = tg.id and et.environment_id = e.id
+    union
+    select gtg.goal_id id,e.name environment, tg.name goal_name,'tag' goal_dim,'accountable' ref_type, g.name subgoal_name,'goal' subgoal_dim,'0' alternative_id, concat(tg.name,' accountable ',g.name) rationale from goal_tag gtg, goal g, tag tg, environment_goal eg, environment e where eg.environment_id = environmentId and eg.goal_id = g.id and gtg.goal_id = eg.goal_id and gtg.tag_id = tg.id and eg.environment_id = e.id
+    union
+    select utg.usecase_id id,e.name environment, tg.name goal_name,'tag' goal_dim,'accountable' ref_type, u.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id, concat(tg.name,' accountable ',u.name) rationale from usecase_tag utg, usecase u, tag tg, environment_usecase eu, environment e where eu.environment_id = environmentId and eu.usecase_id = u.id and utg.usecase_id = eu.usecase_id and utg.tag_id = tg.id and eu.environment_id = e.id
+    union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalgoal_goalassociation ga, environment e, goal hg, reference_type rt, goal tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
@@ -7177,6 +7239,14 @@ begin
 
   if compositeCount <= 0
   then
+	select ttg.task_id id,e.name environment, tg.name goal_name,'tag' goal_dim,'accountable' ref_type, t.name subgoal_name,'task' subgoal_dim,'0' alternative_id, concat(tg.name,' accountable ',t.name) rationale from task_tag ttg, task t, tag tg, environment_task et, environment e where et.environment_id = environmentId and et.task_id = t.id and ttg.task_id = et.task_id and ttg.tag_id = tg.id and et.environment_id = e.id
+    union
+    select gtg.goal_id id,e.name environment, tg.name goal_name,'tag' goal_dim,'accountable' ref_type, g.name subgoal_name,'goal' subgoal_dim,'0' alternative_id, concat(tg.name,' accountable ',g.name) rationale from goal_tag gtg, goal g, tag tg, environment_goal eg, environment e where eg.environment_id = environmentId and eg.goal_id = g.id and gtg.goal_id = eg.goal_id and gtg.tag_id = tg.id and eg.environment_id = e.id
+    union
+    select utg.usecase_id id,e.name environment, tg.name goal_name,'tag' goal_dim,'accountable' ref_type, u.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id, concat(tg.name,' accountable ',u.name) rationale from usecase_tag utg, usecase u, tag tg, environment_usecase eu, environment e where eu.environment_id = environmentId and eu.usecase_id = u.id and utg.usecase_id = eu.usecase_id and utg.tag_id = tg.id and eu.environment_id = e.id
+    union
+    select atg.asset_id id,e.name environment, tg.name goal_name,'tag' goal_dim,'accountable' ref_type, a.name subgoal_name,'asset' subgoal_dim,'0' alternative_id, concat(tg.name,' accountable ',a.name) rationale from asset_tag atg, asset a, tag tg, task_asset tc, task t, goal_concern gc, goal g, environment_asset ea, environment e where ea.environment_id = environmentId and ea.asset_id = a.id and atg.asset_id = ea.asset_id and atg.tag_id = tg.id and ea.environment_id = e.id and ea.environment_id = tc.environment_id and tc.task_id = t.id and tc.asset_id = ea.asset_id and ea.environment_id = gc.environment_id and ea.asset_id = gc.asset_id and gc.goal_id = g.id and gc.asset_id = ea.asset_id
+    union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrole_goalassociation ga, environment e, goal hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerole_goalassociation ga, environment e, obstacle hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
@@ -7338,6 +7408,12 @@ begin
 
   if compositeCount <= 0
   then
+	select ttg.task_id id,e.name environment, tg.name goal_name,'tag' goal_dim,'accountable' ref_type, t.name subgoal_name,'task' subgoal_dim,'0' alternative_id, concat(tg.name,' accountable ',t.name) rationale from task_tag ttg, task t, tag tg, environment_task et, environment e where et.environment_id = environmentId and et.task_id = t.id and ttg.task_id = et.task_id and ttg.tag_id = tg.id and et.environment_id = e.id
+    union
+    select utg.usecase_id id,e.name environment, tg.name goal_name,'tag' goal_dim,'accountable' ref_type, u.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id, concat(tg.name,' accountable ',u.name) rationale from usecase_tag utg, usecase u, tag tg, environment_usecase eu, environment e where eu.environment_id = environmentId and eu.usecase_id = u.id and utg.usecase_id = eu.usecase_id and utg.tag_id = tg.id and eu.environment_id = e.id
+    union
+    select atg.asset_id id,e.name environment, tg.name goal_name,'tag' goal_dim,'accountable' ref_type, a.name subgoal_name,'asset' subgoal_dim,'0' alternative_id, concat(tg.name,' accountable ',a.name) rationale from asset_tag atg, asset a, tag tg, environment_asset ea, environment e where ea.environment_id = environmentId and ea.asset_id = a.id and atg.asset_id = ea.asset_id and atg.tag_id = tg.id and ea.environment_id = e.id
+    union
     select -1 id,e.name environment,t.name goal_name,'task' goal_dim,'task_association' ref_type,p.name subgoal_name,'persona' subgoal_dim,'0' alternative_id, '' rationale from task_persona tp, environment e, task t, persona p where tp.environment_id = environmentId and tp.environment_id = e.id and tp.task_id = t.id and tp.persona_id = p.id
     union
     select -1 id,e.name environment,r.name goal_name,'role' goal_dim,'rolepersona_association' ref_type,p.name subgoal_name,'persona' subgoal_dim,'0' alternative_id, '' rationale from persona_role pr, task_persona tp, environment e, environment_usecase eu, role r, persona p where pr.environment_id = environmentId and pr.environment_id = e.id and pr.persona_id = p.id and pr.role_id = r.id and pr.persona_id = tp.persona_id and tp.environment_id = pr.environment_id and tp.environment_id = eu.environment_id
