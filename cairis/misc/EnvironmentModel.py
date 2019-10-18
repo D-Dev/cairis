@@ -95,7 +95,7 @@ class EnvironmentModel:
     if (dimName == 'persona'):
       self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
     elif (dimName == 'tag'):
-      self.theGraph.add_node(pydot.Node(objtName,shape='note',style='filled',margin=0,pencolor='black',color='yellow',fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
+      self.theGraph.add_node(pydot.Node(objtName,shape='hexagon',style='filled',margin=0,color='black',fillcolor='yellow',fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'attacker'):
       self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtName,shapefile=attackerFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
     elif (dimName == 'asset'):

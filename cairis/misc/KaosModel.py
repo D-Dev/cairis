@@ -77,6 +77,7 @@ class KaosModel:
       self.theGraph.add_node(pydot.Node(objtName,shape='parallelogram',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'countermeasure'):
       self.theGraph.add_node(pydot.Node(objtName,shape='hexagon',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
+    elif (dimName == 'tag'):        self.theGraph.add_node(pydot.Node(objtName,shape='hexagon',style='filled',margin=0,color='black',fillcolor='yellow',fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif ((dimName == 'role') and (self.theKaosModel != 'task')):
       self.theGraph.add_node(pydot.Node(objtName,shape='hexagon',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif ((dimName == 'role') and (self.theKaosModel == 'task')):
@@ -193,6 +194,8 @@ class KaosModel:
               self.theGraph.add_node(pydot.Node(refNodeName,shape='circle',style='filled',color='black',label=' ',height='.2',width='.2'))
             elif (associationType == 'responsible'):
               self.theGraph.add_node(pydot.Node(refNodeName,shape='circle',style='filled',color='red',label=' ',height='.2',width='.2'))
+            elif (associationType == 'accountable'):
+              self.theGraph.add_node(pydot.Node(refNodeName,shape='circle',style='filled',color='black',fillcolor='yellow',label=' ',height='.2',width='.2'))
             elif ((associationType == 'conflict') or (associationType == 'obstruct')):
               b = Borg()
               self.theGraph.add_node(pydot.Node(refNodeName,shapefile=conflictFile,margin=0,label='',height='.1',width='.1',peripheries='0'))
