@@ -60,7 +60,7 @@ class GoalsAPI(Resource):
     new_goal_id = dao.add_goal(new_goal)
     dao.close()
 
-    resp_dict = {'message': 'Goal successfully added'}
+    resp_dict = {'message': new_goal.name() + ' created'}
     resp = make_response(json_serialize(resp_dict, session_id=session_id), OK)
     resp.contenttype = 'application/json'
     return resp
@@ -88,7 +88,7 @@ class GoalByNameAPI(Resource):
     dao.update_goal(upd_goal, unquote(name))
     dao.close()
 
-    resp_dict = {'message': 'Goal successfully updated'}
+    resp_dict = {'message': upd_goal.name() + ' updated'}
     resp = make_response(json_serialize(resp_dict), OK)
     resp.contenttype = 'application/json'
     return resp
@@ -100,7 +100,7 @@ class GoalByNameAPI(Resource):
     dao.delete_goal(unquote(name))
     dao.close()
 
-    resp_dict = {'message': 'Goal successfully deleted'}
+    resp_dict = {'message': name + ' deleted'}
     resp = make_response(json_serialize(resp_dict), OK)
     resp.contenttype = 'application/json'
     return resp
@@ -110,12 +110,14 @@ class GoalModelAPI(Resource):
 
   def get(self, environment, goal, usecase):
     session_id = get_session_id(session, request)
+    isTopLevel = request.args.get('top', 0)
+
     model_generator = get_model_generator()
 
     dao = GoalDAO(session_id)
     if goal == 'all':  goal = ''
     if usecase == 'all': usecase = ''
-    dot_code = dao.get_goal_model(environment,goal,usecase)
+    dot_code = dao.get_goal_model(environment,goal,usecase,isTopLevel)
     dao.close()
 
     resp = make_response(model_generator.generate(dot_code, model_type='goal',renderer='dot'), OK)
@@ -197,6 +199,16 @@ class GoalAssociationByNameAPI(Resource):
 
 class GoalAssociationAPI(Resource):
 
+  def get(self):
+    session_id = get_session_id(session, request)
+    environment_name = request.args.get('environment_name', '')
+    dao = GoalAssociationDAO(session_id)
+    assocs = dao.get_goal_associations(environment_name)
+    dao.close()
+    resp = make_response(json_serialize(assocs, session_id=session_id))
+    resp.headers['Content-Type'] = "application/json"
+    return resp
+
   def post(self):
     session_id = get_session_id(session, request)
 
@@ -209,7 +221,6 @@ class GoalAssociationAPI(Resource):
     resp = make_response(json_serialize(resp_dict), OK)
     resp.contenttype = 'application/json'
     return resp
-
 
 class GoalsSummaryAPI(Resource):
 

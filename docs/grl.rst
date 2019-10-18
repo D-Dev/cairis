@@ -1,7 +1,7 @@
 Generating Goal-oriented Requirements Language models
 =====================================================
 
-`The Goal-oriented Requirements Language (GRL) <https://en.wikipedia.org/wiki/Goal-oriented_Requirements_Language>`_ is a language for modelling intentional relationships between goals.  Although CAIRIS does not support the visualisation of GRL models, it is possible to generate GRL models from CAIRIS that are compatible with `jUCMNav <http://jucmnav.softwareengineering.ca/foswiki/ProjetSEG>`_.  There are several reasons why generating GRL models from a CAIRIS model might be useful:
+`The Goal-oriented Requirements Language (GRL) <https://en.wikipedia.org/wiki/Goal-oriented_Requirements_Language>`_ is a language for modelling intentional relationships between goals.  CAIRIS does not support the visualisation of GRL models, but it is possible to generate GRL models from CAIRIS that are compatible with `jUCMNav <http://jucmnav.softwareengineering.ca/foswiki/ProjetSEG>`_.  There are several reasons why generating GRL models from a CAIRIS model might be useful:
 
 * Expressing persona data using GRL can help elicit intentional relationships that support or refute aspects of a persona’s behaviour.
 * Agent-oriented goal modelling language like GRL are popular in Requirements Engineering, making a GRL model a potential vehicle for interchange between RE methods, techniques, and tools.
@@ -24,8 +24,9 @@ Adding GRL elements to persona characteristics
 
 GRL goals, soft goals, or tasks can be associated with persona characteristics, and their supporting grounds, warrants, or rebuttals.
 
-- To add these GRL elements, open the persona characteristic you want to update and, in the General folder, click on the GRL Elements folder.
-- Enter a synopsis for the persona characteristic that expresses the characteristic in intentional terms.
+- To add these GRL elements, open the persona characteristic you want to update, and click on the GRL Elements folder.
+
+- Enter an intention that persona characteristic that expresses the characteristic in intentional terms.
 
 - Select the GRL element type for this synopsis; this can be either a goal, soft goal, or task.
 
@@ -39,7 +40,7 @@ GRL goals, soft goals, or tasks can be associated with persona characteristics, 
 .. figure:: crGrl.jpg
    :alt: Associating GRL with characteristic reference
 
-- Enter a synopsis that expresses the ground, warrrant, or rebuttal reference in intentional terms.
+- Expresses the ground, warrrant, or rebuttal reference in intentional terms.
 
 - Select the GRL element type for this synopsis this can be either a goal or soft goal.
 
@@ -84,7 +85,7 @@ Generating a GRL model
 
 - To generate a GRL model, select the System/Export GRL menu to open the Export GRL modal dialog.
 
-- Select the Environment, Task, and Persona to create the GRL model for.  Persona GRL elements will be present in the exported model only GRL elements have been associated with persona cases.  Task GRL elements will be present only if (i) a traceability link has been added between the use cases where GRL elements are elements.
+- Select the Environment, Task, and Persona to create the GRL model for, together with the name of the output GRL file.  Persona GRL elements will be present in the exported model only GRL elements have been associated with persona cases.  Task GRL elements will be present only if (i) a traceability link has been added between the use cases where GRL elements are elements.
 
 - Click on the Export button to generate a GRL file.
 

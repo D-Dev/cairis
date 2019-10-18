@@ -1,45 +1,48 @@
 language: python
 python:
-- '3.6'
-dist: trusty
+- '3.7'
+dist: bionic
 sudo: required
 services:
 - mysql
 addons:
   apt:
     packages:
-    - python-dev
+    - python3-dev
     - build-essential
+    - mysql-server
+    - mysql-client
     - graphviz
-    - python-pip
-    - python-numpy
+    - python3-pip
+    - python3-numpy
+    - python3-mysqldb
+    - python3-pytest
     - git
-    - libmysqlclient-dev
+    - default-libmysqlclient-dev
     - docbook
-    - python-apt
+    - python3-apt
     - dblatex
     - texlive-latex-extra
     - docbook-utils
     - libxml2-dev
     - libxslt1-dev
-    - google-chrome-stable
+    - python3-setuptools
+    - pandoc
 
 env:
 - PYTHONPATH=. CAIRIS_SRC=$PYTHONPATH/cairis CAIRIS_CFG=cairis_travis.cnf XML_CATALOG_FILES=$CAIRIS_SRC/config/catalog
     $CAIRIS_CFG_DIR=./travisConfig
 
+before_install: 
+- sudo cp $CAIRIS_CFG_DIR/mysqld.cnf /etc/mysql/mysql.conf.d/
+- sudo service mysql restart
+
 install:
 - pip install -r test_requirements.txt
-- pip install -r requirements.txt
+- pip install -r travis_requirements.txt
 
-before_script:
-- latestChromeDriver=$(curl https://chromedriver.storage.googleapis.com/LATEST_RELEASE)
-- wget https://chromedriver.storage.googleapis.com/$latestChromeDriver/chromedriver_linux64.zip
-- sudo unzip chromedriver_linux64 -d /usr/bin
-- sudo chmod a+x /usr/bin/chromedriver
 
 script:
-- behave
 - py.test cairis/test --doctest-modules -v --cov cairis/core cairis/daemon cairis/controllers
   cairis/data cairis/tools --cov-report term-missing
 

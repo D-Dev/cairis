@@ -61,8 +61,8 @@ class KaosModel:
       dimName = 'template_goal'
     objtUrl = dimName + '#' + objtName
     b = Borg()
-    actorFile = b.staticDir + '/assets/modelActor.png'
-    attackerFile = b.staticDir + '/assets/modelAttacker.png'
+    actorFile = b.assetDir + '/modelActor.png'
+    attackerFile = b.assetDir + '/modelAttacker.png'
       
     if ((dimName == 'goal') or (dimName == 'template_goal')):
       self.theGraph.add_node(pydot.Node(objtName,shape='parallelogram',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
@@ -80,7 +80,7 @@ class KaosModel:
     elif ((dimName == 'role') and (self.theKaosModel != 'task')):
       self.theGraph.add_node(pydot.Node(objtName,shape='hexagon',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif ((dimName == 'role') and (self.theKaosModel == 'task')):
-      self.theGraph.add_node(pydot.Node(objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
+      self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
     elif (dimName == 'usecase'):
       self.theGraph.add_node(pydot.Node(objtName,shape='ellipse',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'task'):
@@ -94,25 +94,28 @@ class KaosModel:
     elif (dimName == 'misusecase'):
       ellipseColour = 'black'
       if (self.theKaosModel == 'task'):
-        riskName = objtName[8:]
-        riskObjt = self.dbProxy.dimensionObject(riskName,'risk')
-        riskScores = self.dbProxy.riskScore(riskObjt.threat(),riskObjt.vulnerability(),self.theEnvironmentName,riskName)
-        highestScore = 0
-        for riskScore in riskScores:
-          currentScore = riskScore[2]
-          if (currentScore > highestScore):
-            highestScore = currentScore
-        ellipseColour = threatColourCode(highestScore)
+        try:
+          riskName = objtName[8:]
+          riskObjt = self.dbProxy.dimensionObject(riskName,'risk')
+          riskScores = self.dbProxy.riskScore(riskObjt.threat(),riskObjt.vulnerability(),self.theEnvironmentName,riskName)
+          highestScore = 0
+          for riskScore in riskScores:
+            currentScore = riskScore[2]
+            if (currentScore > highestScore):
+              highestScore = currentScore
+          ellipseColour = threatColourCode(highestScore)
+        except TypeError as ex:
+          raise ARMException("Error processing risk " + riskName + " in task model" + format(ex))
       self.theGraph.add_node(pydot.Node(objtName,shape='ellipse',margin=0,style='filled',color=ellipseColour,fontcolor=riskTextColourCode(highestScore),fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'persona'):
       objt = self.dbProxy.dimensionObject(objtName,'persona')
       if (objt.assumption() == True):
         objtLabel = "&lt;&lt;Assumption&gt;&gt;" + objtName 
-        self.theGraph.add_node(pydot.Node(objtName,label=objtLabel,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
+        self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtLabel,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
       else: 
-        self.theGraph.add_node(pydot.Node(objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
+        self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
     elif (dimName == 'attacker'):
-      self.theGraph.add_node(pydot.Node(objtName,shapefile=attackerFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
+      self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtName,shapefile=attackerFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
     elif (dimName == 'response'):
       self.theGraph.add_node(pydot.Node(objtName,shape='note',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'asset'):
@@ -139,7 +142,7 @@ class KaosModel:
 
   def buildGoalModel(self,isComponent=False):
     b = Borg()
-    conflictFile = b.staticDir + '/assets/modelConflict.png'
+    conflictFile = b.assetDir + '/modelConflict.png'
     self.nodeNameSet = set([])
     refNodes = set([])
     # the Graph get_edge function doesn't appear to work, so we'll keep a set of edges ourselves.
@@ -180,25 +183,23 @@ class KaosModel:
         assocDirection = 'forward'
         arrowHead = 'vee'
         if ((subGoalName,refNodeName) not in edgeSet):
-          objtUrl = 'link#' + goalEnv + '/' + goalName + '/' + subGoalName + '/' + goalDimName + '/' + subGoalDimName
+          objtUrl = 'goalassociation#' + goalEnv + '/' + goalName + '/' + subGoalName 
           if (alternativeFlag == 1):
             refNodeName = goalName + '#' + subGoalName + '#' + associationType
           if (refNodeName not in refNodes):
             if (associationType == 'and'):
-              objtUrl = 'linkand#' + goalEnv + '/' + goalName + '/' + subGoalName + '/' + goalDimName + '/' + subGoalDimName
-              self.theGraph.add_node(pydot.Node(refNodeName,shape='circle',label=' ',height='.2',width='.2',URL=objtUrl))
+              self.theGraph.add_node(pydot.Node(refNodeName,shape='circle',label=' ',height='.2',width='.2'))
             elif (associationType == 'or'):
-              objtUrl = 'linkor#' + goalEnv + '/' + goalName + '/' + subGoalName + '/' + goalDimName + '/' + subGoalDimName
-              self.theGraph.add_node(pydot.Node(refNodeName,shape='circle',style='filled',color='black',label=' ',height='.2',width='.2',URL=objtUrl))
+              self.theGraph.add_node(pydot.Node(refNodeName,shape='circle',style='filled',color='black',label=' ',height='.2',width='.2'))
             elif (associationType == 'responsible'):
-              objtUrl = 'linkresponsible#' + goalEnv + '/' + goalName + '/' + subGoalName + '/' + goalDimName + '/' + subGoalDimName
-              self.theGraph.add_node(pydot.Node(refNodeName,shape='circle',style='filled',color='red',label=' ',height='.2',width='.2',URL=objtUrl))
+              self.theGraph.add_node(pydot.Node(refNodeName,shape='circle',style='filled',color='red',label=' ',height='.2',width='.2'))
             elif ((associationType == 'conflict') or (associationType == 'obstruct')):
-              objtUrl = 'linkconflict#' + goalEnv + '/' + goalName + '/' + subGoalName + '/' + goalDimName + '/' + subGoalDimName
               b = Borg()
-              self.theGraph.add_node(pydot.Node(refNodeName,shapefile=conflictFile,margin=0,label='',height='.1',width='.1',URL=objtUrl,peripheries='0'))
+              self.theGraph.add_node(pydot.Node(refNodeName,shapefile=conflictFile,margin=0,label='',height='.1',width='.1',peripheries='0'))
               assocDirection = 'none'
               arrowHead = 'none'
+            elif((goalDimName == 'requirement') and (subGoalDimName == 'usecase')):
+              self.theGraph.add_node(pydot.Node(refNodeName,shape='circle',label=' ',height='.2',width='.2'))
             goalEdge = pydot.Edge(refNodeName,goalName,dir=assocDirection,arrowhead=arrowHead,weight='1')
             if ((refNodeName,goalName) not in edgeSet):
               self.theGraph.add_edge(goalEdge)
@@ -206,7 +207,7 @@ class KaosModel:
               refNodes.add(refNodeName)
 
           if ((subGoalName,refNodeName) not in edgeSet):
-            self.theGraph.add_edge(pydot.Edge(subGoalName,refNodeName,dir='none',weight='1'))
+            self.theGraph.add_edge(pydot.Edge(subGoalName,refNodeName,dir='none',weight='1',URL=objtUrl))
             edgeSet.add((subGoalName,refNodeName))
         else:
           pass

@@ -21,6 +21,8 @@ from .cdb import db
 __author__ = 'Robin Quetin, Shamal Faily'
 
 roles_users = db.Table('roles_users', db.Column('user_id', db.Integer(), db.ForeignKey('auth_user.id')), db.Column('role_id', db.Integer(), db.ForeignKey('auth_role.id')))
+db_owner = db.Table('db_owner', db.Column('db',db.String(64)), db.Column('owner', db.String(32)))
+
 
 class Role(db.Model, RoleMixin):
   __tablename__ = 'auth_role'
@@ -32,7 +34,10 @@ class User(db.Model, UserMixin):
   __tablename__ = 'auth_user'
   id = db.Column(db.Integer, primary_key=True)
   email = db.Column(db.String(255), unique=True) 
+  account = db.Column(db.String(32), unique=True) 
   password = db.Column(db.String(255))
+  dbtoken = db.Column(db.String(255))
+  name = db.Column(db.String(255)) 
   active = db.Column(db.Boolean())
   confirmed_at = db.Column(db.DateTime())
   roles = db.relationship('Role', secondary=roles_users, backref=db.backref('users', lazy='dynamic'))

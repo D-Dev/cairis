@@ -28,6 +28,8 @@ import jsonpickle
 from cairis.test.CairisDaemonTestCase import CairisDaemonTestCase
 from cairis.tools.PseudoClasses import ProjectSettings, Contributor, Revision
 from cairis.mio.ModelImport import importModelFile
+from cairis.core.dba import createDbOwnerDatabase, createDatabaseAccount, createDatabaseAndPrivileges, createDatabaseSchema
+from cairis.core.Borg import Borg
 import os
 
 __author__ = 'Robin Quetin, Shamal Faily'
@@ -39,6 +41,11 @@ class ProjectAPITests(CairisDaemonTestCase):
 
   @classmethod
   def setUpClass(cls):
+    b = Borg()
+    createDbOwnerDatabase(b.rPasswd,b.dbHost,b.dbPort)
+    createDatabaseAccount(b.rPasswd,b.dbHost,b.dbPort,'cairis_test','cairis_test')
+    createDatabaseAndPrivileges(b.rPasswd,b.dbHost,b.dbPort,'cairis_test','cairis_test','cairis_test_default')
+    createDatabaseSchema(b.cairisRoot,b.dbHost,b.dbPort,'cairis_test','cairis_test','cairis_test_default')
     importModelFile(os.environ['CAIRIS_SRC'] + '/../examples/exemplars/NeuroGrid/NeuroGrid.xml',1,'test')
 
 
@@ -136,7 +143,7 @@ class ProjectAPITests(CairisDaemonTestCase):
     assert isinstance(json_dict, dict)
     message = json_dict.get('message', None)
     self.assertIsNotNone(message, 'No message in response')
-    self.assertGreater(message.find('0'), -1, 'Failed to import any data')
+    self.assertGreater(message.find('imported'), -1, 'Failed to import any data')
     self.logger.info('[%s] Successfully created new project and restored the example project\n', method)
 
   def convert_to_obj(self, json_dict):
@@ -280,7 +287,7 @@ class ProjectAPITests(CairisDaemonTestCase):
     self.assertIsNotNone(dbs, 'No results after deserialization')
     self.assertIsInstance(dbs, list, 'The result is not a list as expected')
     self.assertGreater(len(dbs), 0, 'No databases in the list')
-    self.assertEqual('testshowdb' in dbs, True)
+    self.assertEqual('testshowdb' in list(map(lambda x: x['database'],dbs)), True)
 
   def test_delete_database(self):
     method = 'test_delete_database'
@@ -328,4 +335,4 @@ class ProjectAPITests(CairisDaemonTestCase):
     dbs = jsonpickle.decode(responseData)
     self.assertIsNotNone(dbs, 'No results after deserialization')
     self.assertIsInstance(dbs, list, 'The result is not a list as expected')
-    self.assertEqual('testdeldb' not in dbs, True)
+    self.assertEqual('testdeldb' not in list(map(lambda x: x['database'],dbs)), True)

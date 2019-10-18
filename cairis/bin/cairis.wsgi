@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 #  Licensed to the Apache Software Foundation (ASF) under one
 #  or more contributor license agreements.  See the NOTICE file
 #  distributed with this work for additional information
@@ -22,6 +22,8 @@ import os
 import sys
 from cairis.daemon import create_app
 from cairis.daemon.CairisHTTPError import CairisHTTPError
+from cairis.bin.add_cairis_user import addAdditionalUserData
+from flask_security import user_registered
 
 
 application = create_app()
@@ -31,10 +33,13 @@ def apply_caching(response):
   response.headers["X-Frame-Options"] = "SAMEORIGIN"
   return response
 
+@user_registered.connect_via(application)
+def enroll(sender, user, confirm_token):
+  addAdditionalUserData(user.email, user.password)
 
 if __name__ == '__main__':
   try:
     application.run() 
-  except CairisHTTPError, e:
-    print 'Fatal CAIRIS error: ' + str(e)
+  except CairisHTTPError as e:
+    print('Fatal CAIRIS error: ' + str(e))
     sys.exit(-1)

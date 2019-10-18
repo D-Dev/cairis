@@ -64,7 +64,7 @@ class RequirementsAPI(Resource):
     dao.add_requirement(new_req, asset_name=asset_name, environment_name=environment_name)
     dao.close()
 
-    resp_dict = {'message': 'Requirement successfully added'}
+    resp_dict = {'message': new_req.name() + ' created'}
     resp = make_response(json_serialize(resp_dict), OK)
     resp.contenttype = 'application/json'
     return resp
@@ -79,6 +79,17 @@ class RequirementsByAssetAPI(Resource):
     reqs = dao.get_requirements(constraint_id=name, is_asset=True, ordered=(ordered=='1'))
     dao.close()
 
+    resp = make_response(json_serialize(reqs, session_id=session_id), OK)
+    resp.headers['Content-type'] = 'application/json'
+    return resp
+
+class RequirementNamesByAssetAPI(Resource):
+
+  def get(self, name):
+    session_id = get_session_id(session, request)
+    dao = RequirementDAO(session_id)
+    reqs = dao.get_dimension_requirement_names('asset',name)
+    dao.close()
     resp = make_response(json_serialize(reqs, session_id=session_id), OK)
     resp.headers['Content-type'] = 'application/json'
     return resp
@@ -98,6 +109,17 @@ class RequirementsByEnvironmentAPI(Resource):
     resp.headers['Content-type'] = 'application/json'
     return resp
 
+
+class RequirementNamesByEnvironmentAPI(Resource):
+
+  def get(self, name):
+    session_id = get_session_id(session, request)
+    dao = RequirementDAO(session_id)
+    reqs = dao.get_dimension_requirement_names('environment',name)
+    dao.close()
+    resp = make_response(json_serialize(reqs, session_id=session_id), OK)
+    resp.headers['Content-type'] = 'application/json'
+    return resp
 
 class RequirementByNameAPI(Resource):
 
@@ -119,7 +141,7 @@ class RequirementByNameAPI(Resource):
     dao.delete_requirement(name=name)
     dao.close()
 
-    resp_dict = {'message': 'Requirement successfully deleted'}
+    resp_dict = {'message': name + ' deleted'}
     resp = make_response(json_serialize(resp_dict), OK)
     resp.headers['Content-type'] = 'application/json'
     return resp
@@ -131,7 +153,7 @@ class RequirementByNameAPI(Resource):
     dao.update_requirement(req, name=name)
     dao.close()
 
-    resp_dict = {'message': 'Requirement successfully updated'}
+    resp_dict = {'message': req.name() + ' updated'}
     resp = make_response(json_serialize(resp_dict), OK)
     resp.headers['Content-type'] = 'application/json'
     return resp
@@ -140,13 +162,16 @@ class ConceptMapModelAPI(Resource):
 
   def get(self, environment,requirement):
     session_id = get_session_id(session, request)
+    isAsset = request.args.get('asset', '0')
+    if (isAsset == '1'):
+      isAsset = True
+    else:
+      isAsset = False
+
     model_generator = get_model_generator()
 
-    if requirement == 'all':
-      requirement = ''
-
     dao = RequirementDAO(session_id)
-    dot_code = dao.get_concept_map_model(environment, requirement)
+    dot_code = dao.get_concept_map_model(environment, requirement, isAsset)
     dao.close()
 
     if not isinstance(dot_code, str):

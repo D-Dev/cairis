@@ -27,6 +27,8 @@ from cairis.core.colourcodes import usabilityTextColourCode
 from cairis.core.colourcodes import probabilityTextColourCode
 from cairis.core.colourcodes import obstacleColourCode
 from cairis.core.colourcodes import riskTextColourCode
+from cairis.core.colourcodes import threatTextColour
+from cairis.core.colourcodes import vulnerabilityTextColour
 
 USECASE_TYPE = 0
 MISUSECASE_TYPE = 1
@@ -64,7 +66,7 @@ def arrayToThreatSecurityPropertiesTable(spArray,objtName):
 
 
 class EnvironmentModel:
-  def __init__(self,tlinks,environmentName,dp, modelLayout, fontName=None, fontSize=None):
+  def __init__(self,tlinks,environmentName,dp, modelLayout, fontName=None, fontSize=None,isTagged=False):
     self.theTraceLinks = tlinks
     self.theEnvironmentName = environmentName
     self.dbProxy = dp
@@ -76,6 +78,7 @@ class EnvironmentModel:
     self.theGraphName = b.tmpDir + '/pydotout.dot'
     self.theRenderer = modelLayout
     self.theNodeLookup = {}
+    self.isTagged = isTagged
 
   def buildGraph(self):
     self.buildGraph()
@@ -85,16 +88,16 @@ class EnvironmentModel:
 
   def buildNode(self,dimName,objtName):
     b = Borg()
-    actorFile = b.staticDir + '/assets/modelActor.png'
-    attackerFile = b.staticDir + '/assets/modelAttacker.png'
-    roleFile = b.staticDir + '/assets/modelRole.png'
+    actorFile = b.assetDir + '/modelActor.png'
+    attackerFile = b.assetDir + '/modelAttacker.png'
+    roleFile = b.assetDir + '/modelRole.png'
     objtUrl = dimName + '#' + str(objtName)
     if (dimName == 'persona'):
-      self.theGraph.add_node(pydot.Node(objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
+      self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
     elif (dimName == 'tag'):
       self.theGraph.add_node(pydot.Node(objtName,shape='note',style='filled',margin=0,pencolor='black',color='yellow',fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'attacker'):
-      self.theGraph.add_node(pydot.Node(objtName,shapefile=attackerFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
+      self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtName,shapefile=attackerFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
     elif (dimName == 'asset'):
       assetObjt = self.dbProxy.dimensionObject(objtName,'asset')
       borderColour = 'black'
@@ -104,11 +107,11 @@ class EnvironmentModel:
     elif (dimName == 'threat'):
       thrObjt = self.dbProxy.dimensionObject(objtName,'threat')
       thrLhood = thrObjt.likelihood(self.theEnvironmentName,self.theEnvironmentObject.duplicateProperty(),self.theEnvironmentObject.overridingEnvironment())
-      self.theGraph.add_node(pydot.Node(objtName,shape='record',style='filled',margin=0,color='black',fillcolor=threatLikelihoodColourCode(thrLhood),fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,label=arrayToThreatSecurityPropertiesTable(thrObjt.securityProperties(self.theEnvironmentName),objtName)))
+      self.theGraph.add_node(pydot.Node(objtName,shape='record',style='filled',margin=0,color='black',fontcolor=threatTextColour(thrLhood),fillcolor=threatLikelihoodColourCode(thrLhood),fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,label=arrayToThreatSecurityPropertiesTable(thrObjt.securityProperties(self.theEnvironmentName),objtName)))
     elif (dimName == 'vulnerability'):
       vulObjt = self.dbProxy.dimensionObject(objtName,'vulnerability')
       vulSev = vulObjt.severity(self.theEnvironmentName,self.theEnvironmentObject.duplicateProperty(),self.theEnvironmentObject.overridingEnvironment())
-      self.theGraph.add_node(pydot.Node(objtName,shape='record',style='filled',margin=0,colorscheme='orrd4',color='black',fillcolor=vulnerabilitySeverityColourCode(vulSev),fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
+      self.theGraph.add_node(pydot.Node(objtName,shape='record',style='filled',margin=0,colorscheme='orrd4',fontcolor=vulnerabilityTextColour(vulSev),fillcolor=vulnerabilitySeverityColourCode(vulSev),fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'risk'):
       riskObjt = self.dbProxy.dimensionObject(objtName,'risk')
       riskScores = self.dbProxy.riskScore(riskObjt.threat(),riskObjt.vulnerability(),self.theEnvironmentName,objtName)
@@ -134,7 +137,7 @@ class EnvironmentModel:
       obsProb,obsRationale = self.dbProxy.obstacleProbability(obsId,envId)
       self.theGraph.add_node(pydot.Node(objtName,shape='polygon',margin=0,skew='-0.4',style='filled',pencolor='black',colorscheme='ylorrd9',fillcolor=obstacleColourCode(obsProb),fontname=self.fontName,fontsize=self.fontSize,fontcolor=probabilityTextColourCode(obsProb),URL=objtUrl))
     elif (dimName == 'role'):
-      self.theGraph.add_node(pydot.Node(objtName,shapefile=roleFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
+      self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtName,shapefile=roleFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
     elif (dimName == 'responsibility'):
       self.theGraph.add_node(pydot.Node(objtName,shape='doubleoctagon',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'environment'):
@@ -147,8 +150,6 @@ class EnvironmentModel:
       taskScore = self.dbProxy.taskUsabilityScore(objtName,self.theEnvironmentName)
       self.theGraph.add_node(pydot.Node(objtName,shape='ellipse',margin=0,style='filled',color=usabilityColourCode(taskScore),pencolor='black',fontname=self.fontName,fontsize=self.fontSize,fontcolor=usabilityTextColourCode(taskScore),URL=objtUrl))
 
-    elif (dimName == 'misusecase'):
-      self.theGraph.add_node(pydot.Node(objtName,shape='ellipse',margin=0,fontname=self.fontName,fontsize=self.fontSize,style='filled',color='black',fontcolor='white',URL=objtUrl))
     else: 
       raise UnknownNodeType(dimName)
 
@@ -171,8 +172,20 @@ class EnvironmentModel:
         self.buildNode(toDimName,toName)
         self.nodeNameSet.add(toName)
         self.theNodeLookup[toName] = toDimName + ' ' + dotLink.toName()
-      edge = pydot.Edge(str(fromName),str(toName),dir='none')
+      dirType = 'none'
+      if (fromDimName == 'risk' and toDimName == 'vulnerability'):
+        dirType = 'forward'
+      edge = pydot.Edge(str(fromName),str(toName),dir=dirType)
       self.theGraph.add_edge(edge)
+
+      if (self.isTagged == True):
+        tags = self.dbProxy.riskModelTags(self.theEnvironmentName)
+        if (len(tags) > 0):
+          for tag in tags:
+            cluster = pydot.Cluster(tag,label=tag)
+            for objt in tags[tag]:
+              cluster.add_node(pydot.Node(objt))
+            self.theGraph.add_subgraph(cluster)
     return self.layout()
 
   def layout(self):

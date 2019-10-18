@@ -58,11 +58,11 @@ class DataFlowDiagram:
 
       targetGraph.add_node(pydot.Node(objtName,shape='rectangle',margin=0,style='rounded',fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'entity'):
-      targetGraph.add_node(pydot.Node(objtName,shape='rectangle',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
+      targetGraph.add_node(pydot.Node(objtName,shape='rectangle',margin=0,style='filled',fillcolor='white',fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
 
     elif (dimName == 'datastore'):
       dsLbl = '<<TABLE SIDES="TB" CELLBORDER="0"><TR><TD>' + objtName + '</TD></TR></TABLE>>'
-      targetGraph.add_node(pydot.Node(objtName,label=dsLbl,shape='plaintext',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
+      targetGraph.add_node(pydot.Node(objtName,label=dsLbl,shape='plaintext',style='filled',fillcolor='white',margin=0,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl))
     else:
       raise UnknownNodeType(dimName)
 
@@ -75,13 +75,14 @@ class DataFlowDiagram:
       nodeNameSet = set([])
       edgeSet = set([])
 
-      tbs = self.dbProxy.getTrustBoundaries()
-      for tbName in tbs:
+      tbses = self.dbProxy.getTrustBoundaries()
+      for tbs in tbses:
+        tbName = tbs.theName
         c = pydot.Cluster(tbName,label=str(tbName),style='dashed',fontname=self.fontName,fontsize=self.fontSize)
         self.theClusters[tbName] = c
         self.theGraph.add_subgraph(c)
         try:
-          for tbType,tbComponent in tbs[tbName].components()[self.theEnvironmentName]:
+          for tbType,tbComponent in tbs.components()[self.theEnvironmentName]:
             self.tbDict[tbComponent] = tbName
         except KeyError:
           pass

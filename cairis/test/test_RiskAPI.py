@@ -88,7 +88,7 @@ class RiskAPITests(CairisDaemonTestCase):
         else:
           responseData = rv.data
         elements = jsonpickle.decode(responseData)
-        self.assertEqual(len(elements),69)
+        self.assertEqual(len(elements),66)
 
     def test_get_by_name(self):
         method = 'test_get_by_name'
@@ -173,7 +173,7 @@ class RiskAPITests(CairisDaemonTestCase):
         message = json_resp.get('message', None)
         self.assertIsNotNone(message, 'No message in response')
         self.logger.info('[%s] Message: %s', method, message)
-        self.assertGreater(message.find('successfully updated'), -1, 'The risk was not successfully updated')
+        self.assertGreater(message.find('updated'), -1, 'The risk was not successfully updated')
 
         rv = self.app.get('/api/risks/name/%s?session_id=test' % quote(risk_to_update.theName))
         if (sys.version_info > (3,)):

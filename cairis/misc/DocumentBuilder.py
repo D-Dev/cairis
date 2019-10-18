@@ -30,9 +30,14 @@ from .KaosModel import KaosModel
 from .AssetModel import AssetModel
 from .DataFlowDiagram import DataFlowDiagram
 from .LocationModel import LocationModel
+from .ComponentModel import ComponentModel
 from .AssumptionPersonaModel import AssumptionPersonaModel
+from cairis.core.PropertyHolder import PropertyHolder
 from cairis.core.armid import *
 import requests
+from base64 import b64decode
+import io
+import shutil
 
 __author__ = 'Shamal Faily'
 
@@ -53,16 +58,34 @@ def listToString(l):
       s += ', '
   return s
 
-def paraText(txt):
-  paraTxt = ''
+def escapeText(txt):
+  eTxt = ''
   for c in txt:
-    if (c == '\n') and (txt != '\n'):
-      paraTxt += '</para><para>'
-    elif c == '&':
-      c = '\&'
+    if c == '&':
+      eTxt += '&amp;'
     else:
-      paraTxt += c 
+      eTxt += c
+  return eTxt
+
+def paraText(txt):
+  inPara = False
+  if (txt.find('\n') >= 0):
+    paraTxt = '<para>'
+    inPara = True
+  else:
+    paraTxt = ''
+  for c in txt:
+    if (c == '\n'):
+      paraTxt += '</para><para>'
+      inPara = True
+    elif c == '&':
+      paraTxt += '&amp;'
+    else:
+      paraTxt += c
+  if (inPara == True):
+    paraTxt += "</para>"
   return paraTxt
+
 
 def listToRows(l):
   rows = []
@@ -103,17 +126,40 @@ def tuplesToPara(ts):
     paraTxt += '<para>' + t[0] + ' : ' + t[1] + '</para>' 
   return paraTxt
 
-def buildImage(imageFile,caption):
+def propertiesToPara(ts):
+  paraTxt = ''
+  for t in ts:
+    paraTxt += '<para>' + t[0] + ' : ' + t[1] + ' (' + t[2] + ')</para>' 
+  return paraTxt
+
+def extractImageFile(p,tmpDir,fileName):
+  buf,mimeType = p.getImage(fileName)
+  buf = b64decode(buf)
+  fp = io.BytesIO(buf)
+  b = Borg()
+  f = open(b.tmpDir + '/' + fileName,'wb')
+  f.write(fp.getvalue())
+  f.close()
+
+def buildImage(p,imageFile,caption,fileSuffix = 'svg',extract = True):
+  if ((os.path.isfile(imageFile) == False) and (extract == True)):
+    b = Borg()
+    extractImageFile(p,b.tmpDir,imageFile)
+    imageFile = b.tmpDir + '/' + imageFile
   components = imageFile.split('.')
   if (len(components) != 2):
-    format = 'SVG'
+    if (fileSuffix == 'svg'):
+      format = 'SVG'
+      imageFile += '.svg'
+    else:
+      format = 'JPG'
+      imageFile += '.jpg'
   else:
     format = components[1]
   if (format == 'jpg' or format == 'jpeg' or format == 'JPG' or format == 'JPEG'):
     imageFormat = 'JPG'
   else:
     imageFormat = 'SVG'
-  b = Borg()
   txt = """
     <mediaobject>
       <imageobject>
@@ -123,74 +169,106 @@ def buildImage(imageFile,caption):
     </mediaobject>"""
   return txt
 
-def drawGraph(dotTxt,renderer,graphFile):
-  fd, temp_abspath = make_tempfile(suffix='svg')
+def drawGraph(dotTxt,renderer,graphFile,fileSuffix = 'svg'):
+  fd, temp_abspath = make_tempfile(suffix=fileSuffix)
   temp_file = open(temp_abspath, 'w')
   temp_file.write(dotTxt)
   temp_file.close()
   os.close(fd)
-  cmd([renderer, '-Tsvg', temp_abspath,'-o',graphFile + '.svg'])
+  cmd([renderer, '-T' + fileSuffix, temp_abspath,'-o',graphFile + '.' + fileSuffix])
   os.remove(temp_abspath)
 
 
-def buildModel(p,envName,modelType,graphFile,locsName = ''):
+def buildModel(p,envName,modelType,graphFile,locsName = '',fileSuffix = 'svg'):
   graph = None
   if (modelType == 'Risk'):
     model = EnvironmentModel(p.riskAnalysisModel(envName),envName,p,'dot')
     if (model.size() == 0):
       return False
-    drawGraph(model.graph(),'dot',graphFile)
+    drawGraph(model.graph(),'dot',graphFile,fileSuffix)
   elif (modelType == 'Asset'):
     model = AssetModel(list(p.classModel(envName).values()),envName,db_proxy=p)
     if (model.size() == 0):
       return False
-    drawGraph(model.graph(),'dot',graphFile)
+    drawGraph(model.graph(),'dot',graphFile,fileSuffix)
   elif (modelType == 'Goal'):
     model = KaosModel(list(p.goalModel(envName).values()),envName,'goal',db_proxy=p)
     if (model.size() == 0):
       return False
-    drawGraph(model.graph(),'dot',graphFile)
+    drawGraph(model.graph(),'dot',graphFile,fileSuffix)
   elif (modelType == 'Obstacle'):
     model = KaosModel(list(p.obstacleModel(envName).values()),envName,'obstacle',db_proxy=p)
     if (model.size() == 0):
       return False
-    drawGraph(model.graph(),'dot',graphFile)
+    drawGraph(model.graph(),'dot',graphFile,fileSuffix)
   elif (modelType == 'Task'):
     model = KaosModel(list(p.taskModel(envName).values()),envName,'task',db_proxy=p)
     if (model.size() == 0):
       return False
-    drawGraph(model.graph(),'dot',graphFile)
+    drawGraph(model.graph(),'dot',graphFile,fileSuffix)
   elif (modelType == 'Responsibility'):
     model = KaosModel(list(p.responsibilityModel(envName).values()),envName,'responsibility',db_proxy=p)
     if (model.size() == 0):
       return False
-    drawGraph(model.graph(),'dot',graphFile)
+    drawGraph(model.graph(),'dot',graphFile,fileSuffix)
   elif (modelType == 'DataFlow'):
     model = DataFlowDiagram(p.dataFlowDiagram(envName),envName,db_proxy=p)
     if (model.size() == 0):
       return False
-    drawGraph(model.graph(),'dot',graphFile)
+    drawGraph(model.graph(),'dot',graphFile,fileSuffix)
   elif (modelType == 'PersonalDataFlow'):
     model = DataFlowDiagram(p.personalDataFlowDiagram(envName),envName,db_proxy=p)
     if (model.size() == 0):
       return False
-    drawGraph(model.graph(),'dot',graphFile)
+    drawGraph(model.graph(),'dot',graphFile,fileSuffix)
   elif (modelType == 'Locations'):
     riskOverlay = p.locationsRiskModel(locsName,envName)
     model = LocationModel(locsName,envName,riskOverlay,db_proxy=p)
     if (model.size() == 0):
       return False
-    drawGraph(model.graph(),'dot',graphFile)
+    drawGraph(model.graph(),'dot',graphFile,fileSuffix)
   return True
 
-def buildAPModel(p,personaName,bvName,graphFile):
+def buildComponentModel(p,pName,graphFile,fileSuffix = 'svg'):
+  interfaces,connectors = p.componentView(pName)
+  model = ComponentModel(interfaces,connectors,db_proxy=p)
+  if (model.size() == 0):
+    return False
+  drawGraph(model.graph(),'dot',graphFile,fileSuffix) 
+  return True
+
+def buildComponentAssetModel(p,cName,graphFile,fileSuffix = 'svg'):
+  assocDict = p.componentAssetModel(cName)
+  model = AssetModel(list(assocDict.values()), db_proxy=p, fontName=None, fontSize=None,isComponentAssetModel=True)
+  if (model.size() == 0):
+    return False
+  drawGraph(model.graph(),'dot',graphFile,fileSuffix) 
+  return True
+
+def buildSecurityPatternAssetModel(p,cName,graphFile,fileSuffix = 'svg'):
+  assocDict = p.securityPatternAssetModel(cName)
+  model = AssetModel(list(assocDict.values()), db_proxy=p, fontName=None, fontSize=None,isComponentAssetModel=True)
+  if (model.size() == 0):
+    return False
+  drawGraph(model.graph(),'dot',graphFile,fileSuffix) 
+  return True
+
+def buildComponentGoalModel(p,cName,graphFile,fileSuffix = 'svg'):
+  assocDict = p.componentGoalModel(cName)
+  model = KaosModel(list(assocDict.values()),'', kaosModelType='template_goal', db_proxy=p)
+  if (model.size() == 0):
+    return False
+  drawGraph(model.graph(),'dot',graphFile,fileSuffix) 
+  return True
+
+def buildAPModel(p,personaName,bvName,graphFile,fileSuffix = 'svg'):
   b = Borg()
   graph = None
   proxy = p
   model = AssumptionPersonaModel(proxy.assumptionPersonaModel(personaName,bvName))
   if (model.size() == 0):
     return False
-  drawGraph(model.graph(),'dot',graphFile)
+  drawGraph(model.graph(),'dot',graphFile,fileSuffix)
   return True
 
 def buildTable(tableId, tableTitle, colNames,colData,linkInd = 1):
@@ -222,7 +300,7 @@ def buildTable(tableId, tableTitle, colNames,colData,linkInd = 1):
         txt += """
           <entry>"""
         txt += """
-            <para><link linkend=\"""" + (str(col)).replace(" ","_") + "\">" + str(col) + "</link></para>"""
+            <para><link linkend=\"""" + (str(col)).replace(" ","_") + "\">" + escapeText(str(col)) + "</link></para>"""
         txt += """
           </entry>"""
       else:
@@ -234,12 +312,12 @@ def buildTable(tableId, tableTitle, colNames,colData,linkInd = 1):
           txt += """
           <entry>"""
           txt += """
-            <para><link linkend=\"""" + (str(col[idx])).replace(" ","_") + "\">" + str(col[idx]) + "</link></para>"""
+            <para><link linkend=\"""" + (str(col[idx])).replace(" ","_") + "\">" + escapeText(str(col[idx])) + "</link></para>"""
           txt += """
           </entry>"""
         else:
           txt += """
-          <entry>""" + str(col[idx]) + "</entry>"
+          <entry>""" + escapeText(str(col[idx])) + "</entry>"
     txt += """
         </row>
     """
@@ -271,10 +349,10 @@ def bookHeader(specName,contributors,revisions,logoFile = 'logo.jpg',logoFormat 
     for firstName,surname,affiliation,role in contributors:
       headerText += """
       <author role=\"""" + role + "\">" + """
-        <firstname>""" + firstName + "</firstname>" + """
-        <surname>""" + surname + "</surname>" + """
+        <firstname>""" + escapeText(firstName) + "</firstname>" + """
+        <surname>""" + escapeText(surname) + "</surname>" + """
         <affiliation>
-          <orgname>""" + affiliation + "</orgname>" + """
+          <orgname>""" + escapeText(affiliation) + "</orgname>" + """
         </affiliation>
       </author>"""
     headerText += """
@@ -286,8 +364,8 @@ def bookHeader(specName,contributors,revisions,logoFile = 'logo.jpg',logoFormat 
       headerText += """
       <revision>
         <revnumber>""" + str(revNo) + "</revnumber>" + """
-        <date>""" + revDate + "</date>" + """
-        <revremark>""" + revDesc + "</revremark>" + """
+        <date>""" + escapeText(revDate) + "</date>" + """
+        <revremark>""" + escapeText(revDesc) + "</revremark>" + """
       </revision>"""
     headerText += """ 
     </revhistory>
@@ -305,14 +383,24 @@ def bookFooter():
 
 def reqNotation():
   b = Borg()
-  chapterText = ''' 
-  <xi:include href="'''+b.configDir+"""/reqNotation.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/> """ 
+  chapterText = open(b.configDir + '/reqNotation.xml').read()
+  notationImages = ['raModelKey.pdf','goalModelKey.pdf','taskModelKey.pdf','APKey.pdf','icons.png']
+  tmpDir = b.tmpDir
+  configDir = b.configDir
+  for image in notationImages:
+    chapterText = chapterText.replace(image,tmpDir + '/' + image)
+    shutil.copy(configDir + '/' + image,tmpDir)
   return chapterText
 
 def perNotation():
   b = Borg()
-  chapterText = ''' 
-  <xi:include href="'''+b.configDir+"""/perNotation.xml" xmlns:xi="http://www.w3.org/2003/XInclude"/> """ 
+  chapterText = open(b.configDir + '/perNotation.xml').read()
+  notationImages = ['taskModelKey.pdf','APKey.pdf']
+  tmpDir = b.tmpDir
+  configDir = b.configDir
+  for image in notationImages:
+    chapterText = chapterText.replace(image,tmpDir + '/' + image)
+    shutil.copy(configDir + '/' + image,tmpDir)
   return chapterText
 
 def projectPurpose(pSettings):
@@ -332,10 +420,10 @@ def projectPurpose(pSettings):
   return chapterTxt
 
 def dpiaNeed(p,pSettings):
-  chapterTxt = """
-  <chapter><title>Motivation for DPIA</title>"""
   if (len(pSettings) == 0):
     return ""
+  chapterTxt = """
+  <chapter><title>Motivation for DPIA</title>"""
   chapterTxt += """
     <section><title>Background</title>
       <para>""" + paraText(pSettings['Project Background']) + """</para>
@@ -349,10 +437,10 @@ def dpiaNeed(p,pSettings):
   """
   rpFile = pSettings['Rich Picture']
   if (rpFile != ''):
-    chapterTxt += richPictureSection(rpFile)
+    chapterTxt += richPictureSection(p,rpFile)
 
   environments = p.getEnvironments()
-  if (environments != None):
+  if (len(environments) != 0):
     chapterTxt += """
     <section><title>Contexts of Use</title>
       <para>This section describes the environments within which the planned system will operate in.  Personal information, data flows, and privacy risks may vary based on these environments.</para>
@@ -384,15 +472,15 @@ def dpiaNeed(p,pSettings):
 
 
 
-def dpiaProcessing(p,docDir):
+def dpiaProcessing(p,docDir,fileSuffix = 'svg'):
+  roles = p.getRoles()
+  if (len(roles) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Processing</title>
     <section><title>Roles</title>
       <para>The following roles participate in processes and dataflows.  However, roles may also be fulfilled by potential attackers.</para>
 """
-  roles = p.getRoles()
-  if (roles == None):
-    return ""
   componentRows = []
   for idx,role in roles.items():
     componentRows.append((role.name(),role.description()))
@@ -407,10 +495,10 @@ def dpiaProcessing(p,docDir):
   for idx,env in envs.items():
     environmentName = env.name()
     modelFile = docDir + '/' + environmentName + modelType + 'Model'
-    if (buildModel(p,environmentName,modelType,modelFile) == True):
+    if (buildModel(p,environmentName,modelType,modelFile,'',fileSuffix) == True):
       chapterTxt += """
         <section><title>""" + environmentName + "</title>" 
-      chapterTxt += buildImage(modelFile,environmentName + ' ' + 'Data Flow Diagram')
+      chapterTxt += buildImage(p,modelFile,environmentName + ' ' + 'Data Flow Diagram',fileSuffix,False)
       chapterTxt += """
         </section>"""
   chapterTxt += """
@@ -433,7 +521,7 @@ def dpiaProcessing(p,docDir):
         <para>The scope of processing is limited to the personal information described the following sub-sections.</para>
       </section>
     """
-  chapterTxt = buildAssetContent(p,docDir,chapterTxt,True)
+  chapterTxt = buildAssetContent(p,docDir,chapterTxt,True,fileSuffix)
   chapterTxt += """
     </section>
     <section><title>Context of Processing</title>
@@ -441,7 +529,7 @@ def dpiaProcessing(p,docDir):
         <para>Our understanding of the data subjects is summarised by the personas below.</para>
       </section>
   """ 
-  chapterTxt = buildPersonas(p,docDir,chapterTxt,True)
+  chapterTxt = buildPersonas(p,docDir,chapterTxt,True,fileSuffix)
   chapterTxt += """
     </section>
     <section><title>Purpose of Processing</title>
@@ -454,20 +542,22 @@ def dpiaProcessing(p,docDir):
   """
   return chapterTxt
 
-def dpiaConsultation(p,docDir):
+def dpiaConsultation(p,docDir,fileSuffix):
+  personas = p.getPersonas()
+  if (len(personas) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Consultation</title>
     <section><title>Overview</title>
       <para>Individual views were sought when creating the personas.  These are described in the sections that follow.</para>
     </section>
   """
-  personas = p.getPersonas()
   for idx,persona in personas.items():
     personaName = persona.name()
     chapterTxt += """
      <section><title>""" + personaName + "</title>" + """
     """
-    chapterTxt = buildPersonaRationale(p,personaName, docDir, chapterTxt)
+    chapterTxt = buildPersonaRationale(p,personaName, docDir, chapterTxt,fileSuffix)
     chapterTxt += """
      </section>
     """
@@ -476,11 +566,13 @@ def dpiaConsultation(p,docDir):
   return chapterTxt
 
 def dpiaNecessity(p,docDir):
+  envs = p.getEnvironments()
+  if (len(envs) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Necessity and Proportionality</title>
     <para>The table below describe the processes that handle personal data, and the goals that describe the necessity of this processing.</para>
   """
-  envs = p.getEnvironments()
   for idx,env in envs.items():
     envName = env.name()
     lpTable = p.lawfulProcessingTable(envName)
@@ -554,7 +646,7 @@ def projectScope(pSettings,p,docDir):
   """
   rpFile = pSettings['Rich Picture']
   if (rpFile != ''):
-    chapterTxt += richPictureSection(rpFile)
+    chapterTxt += richPictureSection(p,rpFile)
   chapterTxt += """
   </chapter>
 """
@@ -562,12 +654,12 @@ def projectScope(pSettings,p,docDir):
 
 
 def mandatedConstraints(p):
+  objts = p.getDomainProperties()
+  if (len(objts) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Mandated Constraints</title>
 """
-  objts = p.getDomainProperties()
-  if (objts == None):
-    return ""
 
   rows = []
   for idx,objt in objts.items():
@@ -579,16 +671,16 @@ def mandatedConstraints(p):
   return chapterTxt
 
 def namingConventions(p):
+  objts = p.getDictionary()
+  if (len(objts) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Naming Conventions</title>
 """
   entryRows = []
-  objts = p.getDictionary()
-  if (objts == None):
-    return ""
 
-  for name,defn in objts.items():
-    entryRows.append((name,defn)) 
+  for defn in objts:
+    entryRows.append((defn['name'],defn['value'])) 
   chapterTxt += buildTable('projectNamingConventions','Naming Conventions',['Name','Definition'],entryRows,0)
   chapterTxt += """
   </chapter>
@@ -623,10 +715,13 @@ def frReqSection(typename,reqs):
   return reqSect
 
 def functionalRequirements(frDomDict,ddDomDict):
+  if ((len(frDomDict) == 0) and (len(ddDomDict) == 0)):
+    return ""
   chapterTxt = """
   <chapter><title>Functional Requirements</title>
 """
   chapterTxt += frReqSection('Functional',frDomDict)
+
   chapterTxt += frReqSection('Data',ddDomDict)
   chapterTxt += """
   </chapter>
@@ -634,6 +729,8 @@ def functionalRequirements(frDomDict,ddDomDict):
   return chapterTxt
 
 def nonFunctionalRequirements(reqDict):
+  if (len(reqDict) == 0):
+    return ''
   chapterTxt = """
   <chapter><title>Nonfunctional Requirements</title>
 """
@@ -653,6 +750,9 @@ def nonFunctionalRequirements(reqDict):
   return chapterTxt
 
 def useCases(p,docDir):
+  ucs = p.getUseCases()
+  if (len(ucs) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Use Cases</title>
     <section><title>Overview</title>
@@ -667,7 +767,7 @@ def useCases(p,docDir):
 
 def buildUseCases(p,docDir,chapterTxt):
   ucs = p.getUseCases()
-  if (ucs == None):
+  if (len(ucs) == 0):
     return ""
 
   for idx,uc in ucs.items():
@@ -716,17 +816,17 @@ def buildUseCases(p,docDir,chapterTxt):
   return chapterTxt
 
 
-def tasks(p,docDir):
+def tasks(p,docDir,fileSuffix = 'svg'):
+  tasks = p.getTasks()
+  if (len(tasks) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Tasks</title>
     <section><title>Overview</title>
       <para>This chapter describes the work tasks which the planned system will need to be designed for.  These tasks incorporate some level of interactivity with the planned system, and are carried out by the personas.  Tasks are also scored based on how usable these are to the personas who carry them out.</para>
     </section>
 """
-  chapterTxt += modelSection(p,'Task',docDir)
-  tasks = p.getTasks()
-  if (tasks == None):
-    return ""
+  chapterTxt += modelSection(p,'Task',docDir,fileSuffix)
   
   durationLookup = {}
   durationLookup['None'] = 'None'
@@ -787,7 +887,11 @@ def characteristicsToRows(pcDict):
     rows.append((pc.characteristic(),pc.qualifier(),tuplesToPara(pc.grounds()),tuplesToPara(pc.warrant()),listToPara(pc.backing()),tuplesToPara(pc.rebuttal())) )
   return rows
 
-def personas(p,docDir):
+def personas(p,docDir,fileSuffix):
+  roles = p.getRoles()
+  if (len(roles) == 0):
+    return ""
+
   chapterTxt = """
   <chapter><title>Personas</title>
     <section><title>Overview</title>
@@ -796,9 +900,6 @@ def personas(p,docDir):
     <section><title>Roles</title>
       <para>Personas may fulfil one or more of the below roles.  However, roles may also be fulfilled by potential attackers.</para>
 """
-  roles = p.getRoles()
-  if (roles == None):
-    return ""
   componentRows = []
   for idx,role in roles.items():
     componentRows.append((role.name(),role.description()))
@@ -806,14 +907,14 @@ def personas(p,docDir):
     </section>
     <section><title>Personas</title>
 """
-  chapterTxt = buildPersonas(p,docDir,chapterTxt,False)
+  chapterTxt = buildPersonas(p,docDir,chapterTxt,False,fileSuffix)
   chapterTxt += """
     </section>
   </chapter>
   """          
   return chapterTxt
 
-def buildPersonas(p,docDir,chapterTxt,isDpia = False):
+def buildPersonas(p,docDir,chapterTxt,isDpia = False,fileSuffix = 'svg'):
 
   b = Borg()
   personas = p.getPersonas()
@@ -821,7 +922,8 @@ def buildPersonas(p,docDir,chapterTxt,isDpia = False):
     personaName = persona.name()
     chapterTxt += """
       <section id=\"""" + personaName.replace(" ","_") + "\"><title>" + personaName + "</title>"
-    chapterTxt += buildImage(b.imageDir + "/" + persona.image(),persona.name())
+    if (persona.image() != ''):
+      chapterTxt += buildImage(p,persona.image(),persona.name(),fileSuffix)
     chapterTxt += """
         <section><title>Type</title>
           """ + "<para>" + paraText(persona.type()) + "</para>" + """
@@ -863,13 +965,13 @@ def buildPersonas(p,docDir,chapterTxt,isDpia = False):
       """ 
     
     if (isDpia == False):
-      chapterTxt = buildPersonaRationale(p,persona.name(), docDir, chapterTxt)
+      chapterTxt = buildPersonaRationale(p,persona.name(), docDir, chapterTxt, fileSuffix)
     chapterTxt += """   
       </section>"""
   return chapterTxt
 
-def buildPersonaRationale(p,personaName,docDir,chapterTxt):
-  chapterTxt += personaModelSection(p,personaName,docDir)
+def buildPersonaRationale(p,personaName,docDir,chapterTxt,fileSuffix):
+  chapterTxt += personaModelSection(p,personaName,docDir,fileSuffix)
 
   docRefs = p.getPersonaDocumentReferences(personaName)
   if len(docRefs) > 0:
@@ -903,6 +1005,10 @@ def buildPersonaRationale(p,personaName,docDir,chapterTxt):
   return chapterTxt
 
 def attackers(p):
+  attackers = p.getAttackers()
+  if (len(attackers) == 0):
+    return ""
+
   chapterTxt = """
   <chapter><title>Attackers</title>
     <section><title>Overview</title>
@@ -916,7 +1022,7 @@ def attackers(p):
   return chapterTxt
 
 
-def buildAttackers(p,chapterTxt,isPia = False):
+def buildAttackers(p,chapterTxt,isPia = False,fileSuffix = 'svg'):
   capabilityRows = listToRows(p.getValueTypes('capability'))
   motivationRows = listToRows(p.getValueTypes('motivation'))
   chapterTxt += """
@@ -930,19 +1036,20 @@ def buildAttackers(p,chapterTxt,isPia = False):
     </section>
 """
   b = Borg()
-  attackers = None
+  attackers = {}
   if (isPia == True):
     attackers = p.getPersonalAttackers()
   else: 
     attackers = p.getAttackers()
 
-  if (attackers == None):
-    return ""
+  if (len(attackers) == 0):
+    return chapterTxt
   for idx,attacker in attackers.items():
     attackerName = attacker.name()
     chapterTxt += """
     <section id=\"""" + attackerName.replace(" ","_") + "\"><title>" + attackerName + "</title>"
-    chapterTxt += buildImage(b.imageDir + "/" + attacker.image(),attacker.name())
+    if (attacker.image() != ''):
+      chapterTxt += buildImage(p,attacker.image(),attacker.name(),fileSuffix)
     chapterTxt += "<para>" + paraText(attacker.description()) + "</para>"
 
     aaRows = []
@@ -975,15 +1082,16 @@ def objectiveText(p,environmentName,threatName,vulName):
   return txt
 
 def misuseCases(p):
+  mcs = p.getMisuseCases()
+  if (len(mcs) == 0):
+    return ""
+
   chapterTxt = """
   <chapter><title>Misuse Cases</title>
     <section><title>Overview</title>
       <para>The Misuse Cases below describe how an attacker exploits each of the identified risks.</para>
     </section>
 """
-  mcs = p.getMisuseCases()
-  if mcs == None:
-    return ""
  
   for idx,mc in mcs.items():
     mcName = mc.name()
@@ -1016,21 +1124,24 @@ def misuseCases(p):
   return chapterTxt
 
 
-def assets(p,docDir):
+def assets(p,docDir,fileSuffix):
+  objts = p.getAssets()
+  if (len(objts) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Assets</title>
     <section><title>Overview</title>
       <para>This chapter describes the most important assets in, or associated with, the planned system.</para>
     </section>
   """
-  chapterTxt = buildAssetContent(p,docDir,chapterTxt,False)
+  chapterTxt = buildAssetContent(p,docDir,chapterTxt,False,fileSuffix)
   chapterTxt += """
   </chapter>
   """          
   return chapterTxt
 
 
-def buildAssetContent(p,docDir,chapterTxt,isPia = False):
+def buildAssetContent(p,docDir,chapterTxt,isPia = False,fileSuffix = 'svg'):
   assetTypeRows = listToRows(p.getValueTypes('asset_type'))
   assetPropertyRows = listToRows(p.getValueTypes('asset_value'))
   chapterTxt += """
@@ -1045,16 +1156,16 @@ def buildAssetContent(p,docDir,chapterTxt,isPia = False):
 """
 
   if (isPia == False):
-    chapterTxt += modelSection(p,'Asset',docDir)
+    chapterTxt += modelSection(p,'Asset',docDir,fileSuffix)
 
-  objts = None
+  objts = {}
   if (isPia == True):
     objts = p.getPersonalInformation()
   else:
     objts = p.getAssets()
 
-  if (objts == None):
-    return ""
+  if (len(objts) == 0):
+    return chapterTxt
   for idx,objt in objts.items():
     objtName = objt.name()
     chapterTxt += """
@@ -1071,8 +1182,8 @@ def buildAssetContent(p,docDir,chapterTxt,isPia = False):
     oaRows = []
     for eProps in objt.environmentProperties():
       environmentName = eProps.name()
-      oaRows.append((environmentName,tuplesToPara(objt.propertyList(environmentName,'',''))))
-    chapterTxt += buildTable( objtName.replace(" ","_") + "PropertiesTable",objtName + " environmental attributes",['Environment','Security Properties'],oaRows,0)
+      oaRows.append((environmentName,propertiesToPara(objt.propertyList(environmentName,'',''))))
+    chapterTxt += buildTable( objtName.replace(" ","_") + "PropertiesTable",objtName + " environmental attributes",['Environment','Security Property (Rationale)'],oaRows,0)
     chapterTxt += """
       </section>"""
   return chapterTxt
@@ -1081,6 +1192,10 @@ def buildAssetContent(p,docDir,chapterTxt,isPia = False):
 
 
 def threats(p):
+  objts = p.getThreats()
+  if (len(objts) == 0):
+    return ""
+
   chapterTxt = """
   <chapter><title>Threats</title>
     <section><title>Overview</title>
@@ -1112,14 +1227,14 @@ def buildThreats(p,chapterTxt,isPia = False):
   chapterTxt += buildTable("ThreatPropertiesTable","Threat Properties",['Property','Description'],threatPropertyRows,0) + """
     </section>
 """
-  objts = None
+  objts = {}
   if (isPia == True):
     objts = p.getPersonalThreats()
   else:
     objts = p.getThreats()
 
-  if (objts == None):
-    return ""
+  if (len(objts) == 0):
+    return chapterTxt
   for idx,objt in objts.items():
     objtName = objt.name()
     chapterTxt += """
@@ -1130,12 +1245,15 @@ def buildThreats(p,chapterTxt,isPia = False):
     oaRows = []
     for eProps in objt.environmentProperties():
       environmentName = eProps.name()
-      oaRows.append((environmentName,eProps.likelihood(),listToPara(eProps.attackers()),tuplesToPara(objt.propertyList(environmentName,'',''))))
+      oaRows.append((environmentName,eProps.likelihood(),listToPara(eProps.attackers()),propertiesToPara(objt.propertyList(environmentName,'',''))))
     chapterTxt += buildTable( objtName.replace(" ","_") + "PropertiesTable",objtName + " environmental attributes",['Environment','Likelihood','Attackers','Security Properties'],oaRows,0) + """
       </section>"""
   return chapterTxt
 
 def vulnerabilities(p):
+  objts = p.getVulnerabilities()
+  if (len(objts) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Vulnerabilities</title>
     <section><title>Overview</title>
@@ -1163,14 +1281,14 @@ def buildVulnerabilities(p,chapterTxt,isPia = False):
     </section>
 """
 
-  objts = None
+  objts = {}
   if (isPia == True):
     objts = p.getPersonalVulnerabilities()
   else:
     objts = p.getVulnerabilities()
 
-  if (objts == None):
-    return ""
+  if (len(objts) == 0):
+    return chapterTxt
   for idx,objt in objts.items():
     objtName = objt.name()
     chapterTxt +=  """
@@ -1179,7 +1297,7 @@ def buildVulnerabilities(p,chapterTxt,isPia = False):
         <para>""" + objt.type() + "</para>" + """
       </section>
       <section><title>Description</title>
-        <para>""" + objt.description() + "</para>" + """
+        <para>""" + escapeText(objt.description()) + "</para>" + """
       </section>
       <section id=\"""" + objtName.replace(" ","_") + "Environments\"><title>Environments</title>"
     for eProps in objt.environmentProperties():
@@ -1198,7 +1316,7 @@ def buildVulnerabilities(p,chapterTxt,isPia = False):
     </section>"""
   return chapterTxt
 
-def modelSection(p,modelType,docDir):
+def modelSection(p,modelType,docDir,fileSuffix = 'svg'):
   validModels = False
   txt = """
     <section><title>Models</title>"""
@@ -1206,11 +1324,11 @@ def modelSection(p,modelType,docDir):
   for idx,env in envs.items():
     environmentName = env.name()
     modelFile = docDir + '/' + environmentName + modelType + 'Model'
-    if (buildModel(p,environmentName,modelType,modelFile) == True):
+    if (buildModel(p,environmentName,modelType,modelFile,'',fileSuffix) == True):
       validModels = True
       txt += """
         <section><title>""" + environmentName + "</title>" 
-      txt += buildImage(modelFile,environmentName + ' ' + modelType + ' Model')
+      txt += buildImage(p,modelFile,environmentName + ' ' + modelType + ' Model',fileSuffix,False)
       txt += """
         </section>"""
   txt += """
@@ -1220,7 +1338,7 @@ def modelSection(p,modelType,docDir):
   else:
     return txt
 
-def locationModelSection(p,locsName,docDir):
+def locationModelSection(p,locsName,docDir,fileSuffix = 'svg'):
   validModels = False
   txt = """
       <section><title>""" + locsName + """</title>"""
@@ -1228,11 +1346,11 @@ def locationModelSection(p,locsName,docDir):
   for idx,env in envs.items():
     environmentName = env.name()
     modelFile = docDir + '/' + locsName + environmentName + 'LocationsModel'
-    if (buildModel(p,environmentName,'Locations',modelFile,locsName) == True):
+    if (buildModel(p,environmentName,'Locations',modelFile,locsName,fileSuffix) == True):
       validModels = True
       txt += """
         <section><title>""" + environmentName + "</title>" 
-      txt += buildImage(modelFile,environmentName + ' ' + 'Locations Model')
+      txt += buildImage(p,modelFile,environmentName + ' ' + 'Locations Model',fileSuffix,False)
       txt += """
         </section>"""
   txt += """
@@ -1243,7 +1361,7 @@ def locationModelSection(p,locsName,docDir):
     return txt
 
 
-def personaModelSection(p,pName,docDir):
+def personaModelSection(p,pName,docDir,fileSuffix = 'svg'):
   validModels = False
   txt = """
     <section><title>""" + pName + """ Argumentation Model</title>
@@ -1251,11 +1369,11 @@ def personaModelSection(p,pName,docDir):
   bvList = ['Activities','Attitudes','Aptitudes','Motivations','Skills','Environment Narrative']
   for bv in bvList:
     modelFile = docDir + '/' + pName + bv + 'Model'
-    if (buildAPModel(p,pName,bv,modelFile) == True):
+    if (buildAPModel(p,pName,bv,modelFile,fileSuffix) == True):
       validModels = True
       txt += """
         <section><title>""" + bv + "</title>"
-      txt += buildImage(modelFile + ".svg",pName + ' ' + bv + ' Assumptions Model')
+      txt += buildImage(p,modelFile + '.' + fileSuffix,pName + ' ' + bv + ' Assumptions Model',fileSuffix,False)
       txt += """
         </section>"""
   txt += """
@@ -1265,28 +1383,29 @@ def personaModelSection(p,pName,docDir):
   else: 
     return txt
 
-def richPictureSection(rpFile):
+def richPictureSection(p,rpFile,fileSuffix = 'svg'):
   b = Borg()
   txt = """
     <section><title>Scope of work</title>
       <para>The following rich picture illustrates the scope of this document.</para>"""
-  txt += buildImage(b.imageDir + "/" + rpFile,'Rich picture of the problem domain')
+  if (rpFile != ''):
+    txt += buildImage(p,rpFile,'Rich picture of the problem domain',fileSuffix)
    
   txt += """
     </section>"""
   return txt
 
-def goals(p,docDir):
+def goals(p,docDir,fileSuffix = 'svg'):
+  objts = p.getGoals()
+  if (len(objts) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Goals</title>
     <section><title>Overview</title>
       <para>This chapter describes the goals that the planned system needs to satisfy.  These are subsequently realised by requirements and tasks, but may be obstructed by obstacles.</para>
     </section>
 """
-  chapterTxt += modelSection(p,'Goal',docDir)
-  objts = p.getGoals()
-  if (objts == None):
-    return ""
+  chapterTxt += modelSection(p,'Goal',docDir,fileSuffix)
   for idx,objt in objts.items():
     objtName = objt.name()
     chapterTxt +=  """
@@ -1302,50 +1421,47 @@ def goals(p,docDir):
   """          
   return chapterTxt
 
-def responsibilities(p,docDir):
+def responsibilities(p,docDir,fileSuffix = 'svg'):
+  deps = p.getDependencyTables()
+  if (len(deps) == 0):
+    return "" 
   chapterTxt = """
   <chapter><title>Responsibilities</title>
     <section><title>Overview</title>
       <para>This chapter describes the dependencies between roles, and the various artifacts that roles are responsible for.</para>
     </section>
 """
-  chapterTxt += modelSection(p,'Responsibility',docDir)
-  deps = p.getDependencyTables()
-  if (len(deps) == 0):
-    chapterTxt += """
-  </chapter>"""
-    return chapterTxt 
-  else:
-    chapterTxt += """
+  chapterTxt += modelSection(p,'Responsibility',docDir,fileSuffix)
+  chapterTxt += """
     <section><title>Dependencies</title>
     """
-    envs = list(deps.keys())
-    envs.sort()
-    for env in envs:
-      chapterTxt += """
-      <section><title>""" + env + """</title>
-      """
-      componentRows = deps[env]
-      chapterTxt += buildTable( env.replace(" ","_") + "DependencyTable","Dependency",['Depender','Dependee','Type','Dependency','Rationale'],componentRows,0) + """
-      </section>"""
+  envs = list(deps.keys())
+  envs.sort()
+  for env in envs:
     chapterTxt += """
+    <section><title>""" + env + """</title>
+    """
+    componentRows = deps[env]
+    chapterTxt += buildTable( env.replace(" ","_") + "DependencyTable","Dependency",['Depender','Dependee','Type','Dependency','Rationale'],componentRows,0) + """
+    </section>"""
+  chapterTxt += """
     </section>"""
   chapterTxt += """
   </chapter>
   """          
   return chapterTxt
 
-def obstacles(p,docDir):
+def obstacles(p,docDir,fileSuffix = 'svg'):
+  objts = p.getObstacles()
+  if (len(objts) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Obstacles</title>
     <section><title>Overview</title>
       <para>Obstacles are obstructions to goals.  These may be refined to possible threats and vulnerabilities.</para>
     </section>
 """
-  chapterTxt += modelSection(p,'Obstacle',docDir)
-  objts = p.getObstacles()
-  if (objts == None):
-    return ""
+  chapterTxt += modelSection(p,'Obstacle',docDir,fileSuffix)
   for idx,objt in objts.items():
     objtName = objt.name()
     chapterTxt +=  """
@@ -1362,14 +1478,17 @@ def obstacles(p,docDir):
   return chapterTxt
 
 
-def risks(p,docDir):
+def risks(p,docDir,fileSuffix = 'svg'):
+  objts = p.getRisks()
+  if (len(objts) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Risks</title>
     <section><title>Overview</title>
       <para>This chapter describes the identified risks which impact the planned system. These arise when attackers launch attacks, manifested as threats, which expose a vulnerability.  A risk is only evident if both the threat and vulnerability exist in at least one environment.</para>
     </section>
   """
-  chapterTxt += modelSection(p,'Risk',docDir)
+  chapterTxt += modelSection(p,'Risk',docDir,fileSuffix)
   chapterTxt = buildRisks(p,docDir,chapterTxt)
   chapterTxt += """
   </chapter>
@@ -1386,14 +1505,14 @@ def buildRisks(p,docDir,chapterTxt,isPia = False):
     </section>
   """
 
-  objts = None
+  objts = {}
   if (isPia == True):
     objts = p.getPersonalRisks()
   else:
     objts = p.getRisks()
 
-  if (objts == None):
-    return ""
+  if (len(objts) == 0):
+    return chapterTxt
   for idx,objt in objts.items():
     objtName = objt.name()
     chapterTxt +=  """
@@ -1409,7 +1528,7 @@ def buildRisks(p,docDir,chapterTxt,isPia = False):
       chapterTxt += """
         <section id=\"""" + (objtName + environmentName).replace(" ","_") + "RiskProperties\"><title>" + environmentName + "</title>" + """
           <section id=\"""" + (objtName + environmentName).replace(" ","_") + "RiskPropertiesRating\"><title>Severity</title>" + """
-            <para>""" + p.riskRating(threatName,vulName,environmentName) + "</para>" + """
+            <para>""" + p.riskRating(-1,threatName,vulName,environmentName) + "</para>" + """
           </section>
           <section id=\"""" + (objtName + environmentName).replace(" ","_") + "RiskPropertiesResponses\"><title>Mitigation Scores</title>" 
       riskScoreList = p.riskScore(threatName,vulName,environmentName,riskName)
@@ -1620,6 +1739,9 @@ def mitigateSection(response):
 
 
 def responses(p):
+  responses = p.getResponses()
+  if (len(responses) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Responses</title>
   """
@@ -1630,14 +1752,14 @@ def responses(p):
   return chapterTxt
 
 def buildResponses(p,chapterTxt,isPia = False):
-  responses = None
+  responses = {}
   if (isPia == True):
     responses = p.getPersonalResponses()
   else:
     responses = p.getResponses()
 
-  if (responses == None):
-    return ""
+  if (len(responses) == 0):
+    return chapterTxt
   acceptTxt = ''
   transferTxt = ''
   mitigateTxt = ''
@@ -1675,12 +1797,12 @@ def buildResponses(p,chapterTxt,isPia = False):
   return chapterTxt
 
 def countermeasures(p):
+  objts = p.getCountermeasures()
+  if (len(objts) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Countermeasures</title>
 """
-  objts = p.getCountermeasures()
-  if (objts == None):
-    return ""
   for idx,objt in objts.items():
     objtName = objt.name()
     chapterTxt +=  """
@@ -1703,9 +1825,9 @@ def countermeasures(p):
       chapterTxt += buildTable( (objtName + environmentName).replace(" ","_") + "CountermeasureRequirementsTable","Requirements",['Requirement'],eProps.requirements(),0)
       chapterTxt += buildTable( (objtName + environmentName).replace(" ","_") + "CountermeasureTargetTable","Targets",['Target','Effectiveness'],eProps.targets(),0)
       cmRows = []
-      for p,v in objt.propertyList(environmentName,'',''):
-        cmRows.append((p,v))
-      chapterTxt += buildTable( (objtName + environmentName).replace(" ","_") + "CountermeasurePropertiesTable","Security Properties",['Property','Value'],cmRows,0) + """
+      for p,v,r in objt.propertyList(environmentName,'',''):
+        cmRows.append((p,v,r))
+      chapterTxt += buildTable( (objtName + environmentName).replace(" ","_") + "CountermeasurePropertiesTable","Security Properties",['Property','Value', 'Rationale'],cmRows,0) + """
           </section>
           <section id=\"""" + (objtName + environmentName).replace(" ","_") + "CountermeasureUsabilityProperties\"><title>Usability Properties</title>" 
       chapterTxt += buildTable( (objtName + environmentName).replace(" ","_") + "CountermeasureRolesTable","Roles",['Role'],eProps.roles(),1)
@@ -1722,7 +1844,7 @@ def countermeasures(p):
 
 def environments(p,docDir):
   environments = p.getEnvironments()
-  if (environments == None):
+  if (len(environments) == 0):
     return ""
   chapterTxt = """
   <chapter><title>Environments</title>
@@ -1791,10 +1913,12 @@ def environments(p,docDir):
   return chapterTxt
 
 def dependencies(p):
+  dependencies = p.getDependencies()
+  if (len(dependencies) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Dependencies</title>
 """
-  dependencies = p.getDependencies()
   envDict = {}
   for idx,d in dependencies.items():
     if d.environment() not in envDict:
@@ -1815,14 +1939,75 @@ def dependencies(p):
   """          
   return chapterTxt
 
-def dataflows(p,docDir):
+def templateAssets(p):
+  templateAssets = p.getTemplateAssets()
+  if (len(templateAssets) == 0):
+    return ''
+  chapterTxt = """
+  <chapter><title>Template Assets</title>
+"""
+  for objtName in templateAssets:
+    chapterTxt += """
+    <section><title>""" + objtName + "</title>"
+    objt = templateAssets[objtName]
+
+    oAttributes = [('Type',objt.type()),('Description',paraText(objt.description())),('Significance',paraText(objt.significance())),('Surface Type',objt.surfaceType()),('Access Rights',objt.accessRight()),('Tags',listToItems(objt.tags()))]
+    chapterTxt += buildTable( objtName.replace(" ","_") + "TemplateAssetPropertiesTable",objtName + " attributes",['Attribute','Description'],oAttributes,0)
+    
+    pl = PropertyHolder(objt.properties())
+    pList = pl.propertyList()
+    if (len(pList) > 0):
+      chapterTxt += buildTable( objtName.replace(" ","_") + "PropertiesTable",objtName + " security properties",['Property','Value'],pList,0)
+    chapterTxt += """
+    </section>"""
+  chapterTxt += """
+  </chapter>
+  """
+  return chapterTxt
+
+def templateGoals(p):
+  templateGoals = p.getTemplateGoals()
+  if (len(templateGoals) == 0):
+    return ''
+  chapterTxt = """
+  <chapter><title>Template Goals</title>
+"""
+  objtRows = []
+  for objtName in templateGoals:
+    objt = templateGoals[objtName]
+    objtRows.append((objt.name(), objt.definition(), objt.rationale(), listToItems(objt.concerns()), listToItems(objt.responsibilities())))
+  chapterTxt += buildTable( "TemplateGoalsTable","Template Goals",['Name','Definition','Rationale','Concerns','Responsibilities'],objtRows,0) + """
+  </chapter>
+  """
+  return chapterTxt
+
+def templateRequirements(p):
+  templateReqs = p.getTemplateRequirements()
+  if (len(templateReqs) == 0):
+    return ''
+  chapterTxt = """
+  <chapter><title>Template Requirements</title>
+"""
+  objtRows = []
+  for objtName in templateReqs:
+    objt = templateReqs[objtName]
+    objtRows.append((objt.name(), objt.asset(), objt.type(), objt.description(), objt.rationale(), objt.fitCriterion()))
+  chapterTxt += buildTable( "TemplateRequirementsTable","Template Requirements",['Name','Asset','Type','Description','Rationale','Fit Criterion'],objtRows,0) + """
+  </chapter>
+  """
+  return chapterTxt
+
+
+def dataflows(p,docDir,fileSuffix = 'svg'):
+  dfs = p.getDataFlows()
+  if (len(dfs) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Data Flows</title>
 """
-  chapterTxt += modelSection(p,'DataFlow',docDir)
-  dfs = p.getDataFlows()
+  chapterTxt += modelSection(p,'DataFlow',docDir,fileSuffix)
   envDict = {}
-  for idx,d in dfs.items():
+  for d in dfs:
     if d.environment() not in envDict:
       envDict[d.environment()] = [(d.name(),d.fromName(),d.fromType(),d.toName(),d.toType(),listToItems(d.assets()))]
     else:
@@ -1841,16 +2026,18 @@ def dataflows(p,docDir):
   """          
   return chapterTxt
 
-def locations(p,docDir):
+def locations(p,docDir,fileSuffix = 'svg'):
+  allLocs = p.getLocations()
+  if (len(allLocs) == 0):
+    return ""
   chapterTxt = """
   <chapter><title>Locations</title>
     <section><title>Models</title>"""
 
-  allLocs = p.getLocations()
   locsList = list(allLocs.keys())
   locsList.sort()
   for locs in locsList:
-    chapterTxt += locationModelSection(p,locs,docDir)
+    chapterTxt += locationModelSection(p,locs,docDir,fileSuffix)
   chapterTxt += """
     </section>
   """          
@@ -1871,18 +2058,139 @@ def locations(p,docDir):
   """          
   return chapterTxt
 
+def securityPatterns(p,docDir,fileSuffix):
+  sPatterns = p.getSecurityPatterns()
+  if (len(sPatterns) == 0):
+    return ''
+  chapterTxt = """
+  <chapter><title>Security Patterns</title>
+  """
+  for pName in sPatterns:
+    chapterTxt += """
+      <section><title>""" + pName + """</title>
+    """          
+    pattern = sPatterns[pName]
+    chapterTxt += """
+        <section><title>Context</title>
+          <para>""" + paraText(pattern.context()) + """</para>
+        </section>
+        <section><title>Problem</title>
+          <para>""" + paraText(pattern.problem()) + """</para>
+        </section>
+        <section><title>Solution</title>
+          <para>""" + paraText(pattern.solution()) + """</para>
+        </section>"""
+    pStruct = pattern.associations()
+    if (len(pStruct) > 0):
+      chapterTxt += """
+        <section><title>Structure</title>
+      """
+      modelFile = docDir + '/' + pName + 'AssetModel'
+      if (buildSecurityPatternAssetModel(p,pName,modelFile,fileSuffix) == True):
+        chapterTxt += buildImage(p,modelFile,pName + ' ' + 'Asset Model',fileSuffix,False)
+      chapterTxt += buildTable(pName + "StructureTable","Structure",['Head','Type','Nry','Role','Role','Nry','Type','Tail'],pStruct,0) + """
+        </section>"""
+    pReqs = pattern.requirements()
+    if (len(pReqs) > 0):
+      chapterTxt += """
+        <section><title>Requirements</title>"""
+      chapterTxt += buildTable(pName + "RequirementsTable","Security Pattern Requirements",['Type','Name','Description','Rationale','Fit Criterion','Asset'],pReqs,0) + """
+        </section>"""
+    chapterTxt += """
+      </section>"""
+  chapterTxt += """
+  </chapter>
+  """
+  return chapterTxt
 
-def architecture(p,docDir):
+
+def architecture(p,docDir,fileSuffix):
+  aPatterns = p.getComponentViews()
+  if (len(aPatterns) == 0):
+    return ''
   chapterTxt = """
   <chapter><title>Architectural Patterns</title>
 """
+  for pName in aPatterns:
+    chapterTxt += """
+      <section><title>""" + pName + """</title>
+    """          
+    pattern = aPatterns[pName]
+    modelFile = docDir + '/' + pName + 'ComponentModel'
+    if (buildComponentModel(p,pName,modelFile,fileSuffix) == True):
+      chapterTxt += buildImage(p,modelFile,pName + ' ' + 'Component Model',fileSuffix,False)
+
+    chapterTxt += """
+        <section><title>Synopsis</title>
+          <para>""" + paraText(pattern.synopsis()) + """</para>
+        </section>"""
+    chapterTxt += """
+        <section><title>Components</title>"""
+    for component in pattern.components():
+      componentName = component.name()
+      chapterTxt += """
+          <section><title>""" + componentName + """</title>
+            <section><title>Description</title>
+              <para>""" + paraText(component.description()) + """</para>
+            </section>"""
+
+      compIfs = component.interfaces()
+      if (len(compIfs) > 0):
+        chapterTxt += """
+            <section><title>Interfaces</title>
+        """ 
+        chapterTxt += buildTable(componentName + "InterfacesTable","Interfaces",['Name','Type','Access Right','Privilege'],compIfs,0) + """
+            </section>"""
+
+      compStruct = component.structure()
+      if (len(compStruct) > 0):
+        chapterTxt += """
+            <section><title>Structure</title>
+        """ 
+        modelFile = docDir + '/' + pName + '_' + componentName + 'AssetModel'
+        if (buildComponentAssetModel(p,componentName,modelFile,fileSuffix) == True):
+          chapterTxt += buildImage(p,modelFile,componentName + ' ' + 'Asset Model',fileSuffix,False)
+        chapterTxt += buildTable(componentName + "StructureTable","Structure",['Head','Type','Nav','Nry','Role','Role','Nry','Nav','Type','Tail'],compStruct,0) + """
+            </section>"""
+      compReqs = component.requirements()
+      if (len(compReqs) > 0):
+        chapterTxt += """
+            <section><title>Requirements</title>"""
+        chapterTxt += buildTable(componentName + "RequirementsTable","Template Requirements",['Name'],compReqs,0) + """
+            </section>"""
+
+      compGoals = component.goals()
+      if (len(compGoals) > 0):
+        chapterTxt += """
+            <section><title>Goals</title>"""
+        chapterTxt += buildTable(componentName + "GoalsTable","Template Goals",['Name'],compGoals,0) + """
+            </section>"""
+
+      compGas = component.associations()
+      if (len(compGas) > 0):
+        chapterTxt += """
+            <section><title>Goal Associations</title>"""
+        modelFile = docDir + '/' + pName + '_' + componentName + 'GoalModel'
+        if (buildComponentGoalModel(p,componentName,modelFile,fileSuffix) == True):
+          chapterTxt += buildImage(p,modelFile,componentName + ' ' + 'Goal Model',fileSuffix,False)
+        chapterTxt += buildTable(componentName + "GoalAssociationsTable","Goal Associations",['Goal','Ref. Type','Sub Goal','Rationale'],compGas,0) + """
+            </section>"""
+      chapterTxt += """
+          </section>"""
+
+    chapterTxt += """
+        </section>
+        <section><title>Connectors</title>"""
+    chapterTxt += buildTable(pName + "ConnectorTable","Connectors",['Connectors','Component','Role','Interface','Component','Interface','Role','Asset','Protocol','Access Right'],pattern.connectors(),0) + """
+        </section>
+      </section>"""
   chapterTxt += """
   </chapter>
   """          
   return chapterTxt
 
 
-def buildReqSpecBody(p,sectionFlags,docDir):
+def buildReqSpecBody(p,sectionFlags,docDir,fileSuffix = 'svg'):
   contributors = p.getContributors()
   revisions = p.getRevisions()
 
@@ -1899,25 +2207,25 @@ def buildReqSpecBody(p,sectionFlags,docDir):
   if (sectionFlags[REQDOC_ENVIRONMENTS_ID]):
     specDoc += environments(p,docDir)
   if (sectionFlags[REQDOC_STAKEHOLDERS_ID]):
-    specDoc += personas(p,docDir)
+    specDoc += personas(p,docDir,fileSuffix)
   if (sectionFlags[REQDOC_MANDATEDCONSTRAINTS_ID]):
     specDoc += mandatedConstraints(p)
   if (sectionFlags[REQDOC_NAMINGCONVENTIONS_ID]):
     specDoc += namingConventions(p)
   if (sectionFlags[REQDOC_ASSETS_ID]):
-    specDoc += assets(p,docDir)
+    specDoc += assets(p,docDir,fileSuffix)
   if (sectionFlags[REQDOC_TASKS_ID]):
-    specDoc += tasks(p,docDir)
+    specDoc += tasks(p,docDir,fileSuffix)
   if (sectionFlags[REQDOC_USECASES_ID]):
     specDoc += useCases(p,docDir)
   if (sectionFlags[REQDOC_DATAFLOWS_ID]):
-    specDoc += dataflows(p,docDir)
+    specDoc += dataflows(p,docDir,fileSuffix)
   if (sectionFlags[REQDOC_GOALS_ID]):
-    specDoc += goals(p,docDir)
+    specDoc += goals(p,docDir,fileSuffix)
   if (sectionFlags[REQDOC_RESPONSIBILITIES_ID]):
-    specDoc += responsibilities(p,docDir)
+    specDoc += responsibilities(p,docDir,fileSuffix)
   if (sectionFlags[REQDOC_OBSTACLES_ID]):
-    specDoc += obstacles(p,docDir)
+    specDoc += obstacles(p,docDir,fileSuffix)
   if (sectionFlags[REQDOC_VULNERABILITIES_ID]):
     specDoc += vulnerabilities(p)
   if (sectionFlags[REQDOC_ATTACKERS_ID]):
@@ -1925,9 +2233,9 @@ def buildReqSpecBody(p,sectionFlags,docDir):
   if (sectionFlags[REQDOC_THREATS_ID]):
     specDoc += threats(p)
   if (sectionFlags[REQDOC_RISKS_ID]):
-    specDoc += risks(p,docDir)
+    specDoc += risks(p,docDir,fileSuffix)
   if (sectionFlags[REQDOC_LOCATIONS_ID]):
-    specDoc += locations(p,docDir)
+    specDoc += locations(p,docDir,fileSuffix)
   if (sectionFlags[REQDOC_MISUSECASES_ID]):
     specDoc += misuseCases(p)
   if (sectionFlags[REQDOC_RESPONSES_ID]):
@@ -1972,11 +2280,20 @@ def buildReqSpecBody(p,sectionFlags,docDir):
 
   if (sectionFlags[REQDOC_DEPENDENCIES_ID]):
     specDoc += dependencies(p)
+  if (sectionFlags[REQDOC_TEMPLATEASSETS_ID]):
+    specDoc += templateAssets(p)
+  if (sectionFlags[REQDOC_TEMPLATEGOALS_ID]):
+    specDoc += templateGoals(p)
+  if (sectionFlags[REQDOC_TEMPLATEREQUIREMENTS_ID]):
+    specDoc += templateRequirements(p)
+  if (sectionFlags[REQDOC_SECURITYPATTERNS_ID]):
+    specDoc += securityPatterns(p,docDir,fileSuffix)
   if (sectionFlags[REQDOC_ARCHITECTURALPATTERNS_ID]):
-    specDoc += architecture(p,docDir)
+    specDoc += architecture(p,docDir,fileSuffix)
+
   return specDoc
 
-def buildPersonasBody(p,sectionFlags,docDir):
+def buildPersonasBody(p,sectionFlags,docDir,fileSuffix = 'svg'):
   contributors = p.getContributors()
   revisions = p.getRevisions()
   pSettings = p.getProjectSettings()
@@ -1991,12 +2308,12 @@ def buildPersonasBody(p,sectionFlags,docDir):
   if (sectionFlags[PERDOC_ENVIRONMENTS_ID]):
     specDoc += environments(p,docDir)
   if (sectionFlags[PERDOC_STAKEHOLDERS_ID]):
-    specDoc += personas(p,docDir)
+    specDoc += personas(p,docDir,fileSuffix)
   if (sectionFlags[PERDOC_TASKS_ID]):
-    specDoc += tasks(p,docDir)
+    specDoc += tasks(p,docDir,fileSuffix)
   return specDoc
 
-def buildDPIABody(p,sectionFlags,docDir):
+def buildDPIABody(p,sectionFlags,docDir,fileSuffix):
   contributors = p.getContributors()
   revisions = p.getRevisions()
   pSettings = p.getProjectSettings()
@@ -2006,9 +2323,9 @@ def buildDPIABody(p,sectionFlags,docDir):
   if (sectionFlags[DPIA_NEED_ID]):
     specDoc += dpiaNeed(p,pSettings)
   if (sectionFlags[DPIA_PROCESSING_ID]):
-    specDoc += dpiaProcessing(p,docDir)
+    specDoc += dpiaProcessing(p,docDir,fileSuffix)
   if (sectionFlags[DPIA_CONSULTATION_ID]):
-    specDoc += dpiaConsultation(p,docDir)
+    specDoc += dpiaConsultation(p,docDir,fileSuffix)
   if (sectionFlags[DPIA_NECESSITY_ID]):
     specDoc += dpiaNecessity(p,docDir)
   if (sectionFlags[DPIA_RISKS_ID]):
@@ -2021,27 +2338,37 @@ def buildDPIABody(p,sectionFlags,docDir):
 def build(dbProxy,docType,sectionFlags,typeFlags,fileName,docDir):
   p = dbProxy
 
-  if (docType == 'Requirements'):
-    specDoc = buildReqSpecBody(p,sectionFlags,docDir)
-  elif (docType == 'Personas'):
-    specDoc = buildPersonasBody(p,sectionFlags,docDir)
-  else:
-    specDoc = buildDPIABody(p,sectionFlags,docDir)
-
-  specDoc += bookFooter()
-
   docFile = docDir + '/' + fileName + '.xml'
-  f = open(docFile,'w')
-  f.write(specDoc)
-  f.close()
-  
- 
+  fileSuffix = 'svg'
   if (typeFlags[DOCOPT_HTML_ID]):
     docBookCmd = 'docbook2html -o ' + docDir + ' ' + docFile
   if (typeFlags[DOCOPT_RTF_ID]):
     docBookCmd = 'docbook2rtf -o ' + docDir + ' ' + docFile
+    fileSuffix = 'jpg'
   if (typeFlags[DOCOPT_PDF_ID]):
     docBookCmd = 'dblatex --param=table.in.float="0" -o  ' + docDir + '/' + fileName + '.pdf '  + docFile
+    fileSuffix = 'jpg'
+  if (typeFlags[DOCOPT_ODT_ID]):
+    docBookCmd = 'pandoc ' + docFile + ' --from docbook --to odt -o ' + docDir + '/' + fileName + '.odt '
+    fileSuffix = 'jpg'
+  if (typeFlags[DOCOPT_DOCX_ID]):
+    docBookCmd = 'pandoc ' + docFile + ' --from docbook --to docx -o ' + docDir + '/' + fileName + '.docx '
+    fileSuffix = 'jpg'
+
+
+  if (docType == 'Requirements'):
+    specDoc = buildReqSpecBody(p,sectionFlags,docDir,fileSuffix)
+  elif (docType == 'Personas'):
+    specDoc = buildPersonasBody(p,sectionFlags,docDir,fileSuffix)
+  else:
+    specDoc = buildDPIABody(p,sectionFlags,docDir,fileSuffix)
+
+  specDoc += bookFooter()
+
+  f = open(docFile,'w')
+  f.write(specDoc)
+  f.close()
+  
 
   b = Borg()
   if(b.docker == True):

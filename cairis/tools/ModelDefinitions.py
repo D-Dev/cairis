@@ -548,10 +548,10 @@ class VulnerabilityEnvironmentPropertiesModel(object):
 class VulnerabilityModel(object):
   resource_fields = {
     obj_id_field: fields.String,
-    'theVulnerabilityName': fields.String,
-    'theVulnerabilityType': fields.String,
+    'theName': fields.String,
+    'theType': fields.String,
     'theTags': fields.List(fields.String),
-    'theVulnerabilityDescription': fields.String,
+    'theDescription': fields.String,
     'theEnvironmentProperties': fields.List(fields.Nested(VulnerabilityEnvironmentPropertiesModel.resource_fields))
   }
   required = list(resource_fields.keys())
@@ -816,7 +816,7 @@ class PersonaCharacteristicModel(object):
     "thePersonaName": fields.String,
     "theModQual": fields.String,
     "theVariable": fields.String,
-    "theCharacteristic": fields.String,
+    "theName": fields.String,
     "theCharacteristicSynopsis": fields.Nested(CharacteristicReferenceSynopsis.resource_fields),
     "theGrounds": fields.List(fields.Nested(CharacteristicReference.resource_fields)),
     "theWarrant": fields.List(fields.Nested(CharacteristicReference.resource_fields)),
@@ -830,7 +830,7 @@ class TaskCharacteristicModel(object):
     obj_id_field: fields.String,
     "theTaskName": fields.String,
     "theModQual": fields.String,
-    "theCharacteristic": fields.String,
+    "theName": fields.String,
     "theGrounds": fields.List(fields.Nested(CharacteristicReference.resource_fields)),
     "theWarrant": fields.List(fields.Nested(CharacteristicReference.resource_fields)),
     "theRebuttal": fields.List(fields.Nested(CharacteristicReference.resource_fields))
@@ -1016,16 +1016,18 @@ class TraceModel(object):
     "theFromObject": fields.String,
     "theFromName": fields.String,
     "theToObject": fields.String,
-    "theToName": fields.String
+    "theToName": fields.String,
+    "theLabel" : fields.String
   }
   required = list(resource_fields.keys())
   required.remove(obj_id_field)
 
-  def __init__(self,fromObjt,fromName,toObjt,toName):
+  def __init__(self,fromObjt,fromName,toObjt,toName,lbl):
     self.theFromObject = fromObjt
     self.theFromName = fromName
     self.theToObject = toObjt
     self.theToName = toName
+    self.theLabel = lbl
 
 class WeaknessTargetModel(object):
   resource_fields = {
@@ -1183,7 +1185,7 @@ class TrustBoundaryComponent(object):
 class TrustBoundaryEnvironmentModel(object):
   resource_fields = {
     obj_id_field: fields.String,
-    'theName': fields.String,
+    'theEnvironmentName': fields.String,
     'theComponents': fields.List(fields.Nested(TrustBoundaryComponent.resource_fields)),
     'thePrivilege' : fields.String
   }
@@ -1191,7 +1193,7 @@ class TrustBoundaryEnvironmentModel(object):
   required.remove(obj_id_field)
 
   def __init__(self,n,c,p):
-    self.theName = n
+    self.theEnvironmentName = n
     self.theComponents = c
     self.thePrivilege = p
 

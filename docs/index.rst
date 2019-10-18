@@ -20,7 +20,8 @@ CAIRIS documentation
    projects
    environments
    assets
-   roles_personas
+   roles
+   personas
    tasks
    misusability
    domainproperties
@@ -41,7 +42,9 @@ CAIRIS documentation
    validation
    configurable
    searching
+   tags
    gendoc
+   api
    troubleshooting
 
 

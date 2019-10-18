@@ -58,7 +58,7 @@ class UseCasesAPI(Resource):
       dao.assign_usecase_contribution(rc)
     dao.close()
 
-    resp_dict = {'message': 'UseCase successfully added'}
+    resp_dict = {'message': new_usecase.name() + ' created'}
     resp = make_response(json_serialize(resp_dict), OK)
     resp.contenttype = 'application/json'
     return resp
@@ -82,15 +82,14 @@ class UseCaseByNameAPI(Resource):
     dao = UseCaseDAO(session_id)
     uc,ucContribs = dao.from_json(request)
     dao.update_usecase(uc, name=name)
+    dao.remove_usecase_contributions(uc)
     if (len(ucContribs) > 0):
       for rc in ucContribs:
         dao.assign_usecase_contribution(rc)
-    else:
-      dao.remove_usecase_contributions(uc)
     dao.close()
 
 
-    resp_dict = {'message': 'UseCase successfully updated'}
+    resp_dict = {'message': uc.name() + ' updated'}
     resp = make_response(json_serialize(resp_dict), OK)
     resp.headers['Content-type'] = 'application/json'
     return resp
@@ -102,7 +101,7 @@ class UseCaseByNameAPI(Resource):
     dao.delete_usecase(name=name)
     dao.close()
 
-    resp_dict = {'message': 'UseCase successfully deleted'}
+    resp_dict = {'message': name + ' deleted'}
     resp = make_response(json_serialize(resp_dict), OK)
     resp.headers['Content-type'] = 'application/json'
     return resp
@@ -131,22 +130,6 @@ class UseCaseGoalsByNameAPI(Resource):
 
     resp = make_response(json_serialize(goals, session_id=session_id), OK)
     resp.headers['Content-type'] = 'application/json'
-    return resp
-
-
-class UseCaseExceptionAPI(Resource):
-
-  def post(self,environment_name,step_name,exception_name):
-    session_id = get_session_id(session, request)
-
-    dao = UseCaseDAO(session_id)
-    uc,ucContribs = dao.from_json(request)
-    dao.generate_obstacle_from_usecase(uc,environment_name,step_name,exception_name)
-    dao.close()
-
-    resp_dict = {'message': 'Obstacle generated from exception'}
-    resp = make_response(json_serialize(resp_dict), OK)
-    resp.contenttype = 'application/json'
     return resp
 
 class UseCasesSummaryAPI(Resource):

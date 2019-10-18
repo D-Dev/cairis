@@ -17,7 +17,7 @@
 
 from cairis.core.ARM import *
 from cairis.core.UseCaseEnvironmentProperties import UseCaseEnvironmentProperties
-from cairis.daemon.CairisHTTPError import ARMHTTPError, ObjectNotFoundHTTPError, MalformedJSONHTTPError, MissingParameterHTTPError, \
+from cairis.daemon.CairisHTTPError import CairisHTTPError, ARMHTTPError, ObjectNotFoundHTTPError, MalformedJSONHTTPError, MissingParameterHTTPError, \
     OverwriteNotAllowedHTTPError
 from cairis.core.UseCase import UseCase
 from cairis.core.Steps import Steps
@@ -31,7 +31,7 @@ from cairis.tools.JsonConverter import json_serialize, json_deserialize
 from cairis.tools.ModelDefinitions import UseCaseModel, UseCaseEnvironmentPropertiesModel, UseCaseContributionModel
 from cairis.tools.SessionValidator import check_required_keys, get_fonts
 from cairis.tools.PseudoClasses import StepAttributes, StepsAttributes, ExceptionAttributes, CharacteristicReferenceContribution
-import cairis.core.ObstacleFactory
+import http.client
 
 __author__ = 'Shamal Faily'
 
@@ -126,6 +126,11 @@ class UseCaseDAO(CairisDAO):
       cProps=usecase.environmentProperties()
     )
 
+    for envProp in usecase.environmentProperties():
+      for step in envProp.steps():
+        for exc in step.exceptions():
+          self.db_proxy.nameCheck(exc[0],'obstacle')
+
     try:
       if not self.check_existing_usecase(usecase.name()):
         new_id = self.db_proxy.addUseCase(usecase_params)
@@ -150,8 +155,11 @@ class UseCaseDAO(CairisDAO):
       tags=usecase.tags(),
       cProps=usecase.environmentProperties()
     )
+
     try:
       ucId = self.db_proxy.getDimensionId(name,'usecase')
+      if (self.db_proxy.exceptionRootObstacles(ucId) > 0):
+        raise CairisHTTPError(status_code=http.client.BAD_REQUEST,status="Exception has root obstacles",message="Cannot update use case while use case exception obstacles are connected to other obstacles, goals, requirements, or domain properties.")
       usecase_params.setId(ucId)
       self.db_proxy.updateUseCase(usecase_params)
     except DatabaseProxyException as ex:
@@ -288,22 +296,6 @@ class UseCaseDAO(CairisDAO):
       self.close()
       raise MissingParameterHTTPError(param_names=['real_props', 'fake_props'])
     return new_props
-
-  def generate_obstacle_from_usecase(self,uc,environment_name,step_name,exception_name):
-    for env in uc.environmentProperties():
-      if (env.theEnvironmentName == environment_name):
-        for ucStep in env.theSteps:
-          if (ucStep.text() == step_name):
-            for excName in ucStep.theExceptions:
-              if (excName == exception_name):
-                excDetails = ucStep.theExceptions[excName]
-                obsName = excDetails[0]
-                excDim = excDetails[1]
-                excVal = excDetails[2]
-                excCat = excDetails[3]
-                excDef = excDetails[4]
-                obsParameters = cairis.core.ObstacleFactory.build(environment_name,obsName,excDim,excVal,excCat,excDef)
-                self.db_proxy.addObstacle(obsParameters)
 
   def assign_usecase_contribution(self,rc):
     if (self.db_proxy.hasContribution('usecase',rc.source(),rc.destination())):

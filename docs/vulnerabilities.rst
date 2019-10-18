@@ -1,7 +1,7 @@
 Vulnerabilities
 ===============
 
-Vulnerabilities are weaknesses of a system, which are liable to
+Vulnerabilities are weaknesses of a system that are liable to
 exploitation.
 
 Create a vulnerability
@@ -18,7 +18,7 @@ Create a vulnerability
 -  Enter the vulnerability name and description, and select the
    vulnerability type from the combo box.
 
--  Click on the Add button in the environment table, and select an environment to situate the vulnerability in. This will add the new environment to the environment list.
+-  Click on the Add button in the environment card, and select an environment to situate the vulnerability in. This will add the new environment to the environment list.
 
 -  Select the vulnerability's severity for this environment, and add exposed assets by clicking on the Add button in the assets table, and selecting one or more assets from the selected environment.
 
@@ -37,7 +37,7 @@ Introducing template threats and vulnerabilities
    :alt: Import Vulnerability
 
 Libraries of template vulnerabilities can be imported into the CAIRIS database and introduced to the current CAIRIS model.  Examples of such libraries in cairis/examples/directories. To import one of these,
-select Introduce from the top of Vulnerabilities or Threats table to open the Introduce from vulnerability directory dialog. When a vulnerability is selected, the Vulnerability form is opened, and pre-populated with information from the directory entry.
+click on the blue Add button at from the top of Vulnerabilities or Threats table to open the Introduce from vulnerability directory dialog. When a vulnerability is selected, the Vulnerability form is opened, and pre-populated with information from the directory entry.
 
 .. figure:: ImportedVulnerabilityForm.jpg
    :alt: Imported Vulnerability

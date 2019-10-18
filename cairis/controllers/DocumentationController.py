@@ -42,25 +42,33 @@ class DocumentationAPI(Resource):
 
   def get(self,doc_type,doc_format):
     session_id = get_session_id(session, request)
+    fileName = request.args.get('filename', 'report')
     dao = DocumentationDAO(session_id)
-    sectionFlags = [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+    sectionFlags = [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
     if (doc_format == 'PDF'):
       filePostfix = 'pdf'
-      doc_format = [0,0,1]
-    else:
+      doc_format = [0,0,1,0,0]
+    elif (doc_format == 'RTF'):
       filePostfix = 'rtf'
-      doc_format = [0,1,0]
-    b = Borg()
-    reportName = b.tmpDir + '/report.' + filePostfix
+      doc_format = [0,1,0,0,0]
+    elif (doc_format == 'ODT'):
+      filePostfix = 'odt'
+      doc_format = [0,0,0,1,0]
+    else:
+      filePostfix = 'docx'
+      doc_format = [0,0,0,0,1]
 
-    dao.generate_documentation(doc_type,sectionFlags,doc_format)
+    b = Borg()
+    reportName = b.tmpDir + '/' + fileName + '.' + filePostfix
+
+    dao.generate_documentation(fileName,doc_type,sectionFlags,doc_format)
     dao.close()
 
     if os.path.isfile(reportName):
-      binary_pdf = open(reportName).read()
+      binary_pdf = open(reportName,'rb').read()
       resp = make_response(binary_pdf)
       resp.headers['Content-Type'] = 'application/' + filePostfix
-      resp.headers['Content-Disposition'] = 'Attachment; filename=report.' + filePostfix
+      resp.headers['Content-Disposition'] = 'Attachment; filename=' + fileName + '.' + filePostfix
       return resp
     else:
       raise CairisHTTPError(status_code=500,message='report file not found',status='Unknown error')

@@ -61,7 +61,7 @@ class TrustBoundaryAPITests(CairisDaemonTestCase):
     self.logger.debug('[%s] Response data: %s', method, responseData)
     json_resp = jsonpickle.decode(responseData)
     self.assertIsNotNone(json_resp, 'No results after deserialization')
-    self.assertEqual(json_resp['message'],'TrustBoundary successfully added')
+    self.assertEqual(json_resp['message'],'Shibboleth created')
     rv = self.app.delete('/api/trust_boundaries/name/Shibboleth?session_id=test')
 
 
@@ -74,10 +74,10 @@ class TrustBoundaryAPITests(CairisDaemonTestCase):
       responseData = rv.data
     tbs = jsonpickle.decode(responseData)
     self.assertIsNotNone(tbs, 'No results after deserialization')
-    self.assertIsInstance(tbs, dict, 'The result is not a dictionary as expected')
+    self.assertIsInstance(tbs, list, 'The result is not a list as expected')
     self.assertGreater(len(tbs), 0, 'No trust_boundaries in the dictionary')
     self.logger.info('[%s] TrustBoundaries found: %d', method, len(tbs))
-    tb = list(tbs.values())[0]
+    tb = tbs[0]
     self.assertEqual(len(tbs),1)
 
   def test_get_by_name(self):
@@ -115,7 +115,7 @@ class TrustBoundaryAPITests(CairisDaemonTestCase):
       responseData = rv.data
     json_resp = jsonpickle.decode(responseData)
     self.assertIsNotNone(json_resp)
-    self.assertEqual(json_resp['message'],'TrustBoundary successfully updated')
+    self.assertEqual(json_resp['message'],'Shibboleth updated')
 
     rv = self.app.get('/api/trust_boundaries/name/Shibboleth?session_id=test')
     self.assertIsNotNone(rv.data, 'No response')
@@ -143,7 +143,7 @@ class TrustBoundaryAPITests(CairisDaemonTestCase):
       responseData = rv.data
     json_resp = jsonpickle.decode(responseData)
     self.assertIsNotNone(json_resp)
-    self.assertEqual(json_resp['message'],'TrustBoundary successfully deleted')
+    self.assertEqual(json_resp['message'],'Shibboleth deleted')
     rv = self.app.delete('/api/trust_boundaries/name/Shibboleth?session_id=test')
 
   def tearDown(self):

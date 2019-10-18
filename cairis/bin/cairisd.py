@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 #  Licensed to the Apache Software Foundation (ASF) under one
 #  or more contributor license agreements.  See the NOTICE file
 #  distributed with this work for additional information
@@ -22,7 +22,10 @@ import os
 import sys
 from cairis.daemon import create_app, db
 from cairis.daemon.CairisHTTPError import CairisHTTPError
+from cairis.bin.add_cairis_user import addAdditionalUserData
 from flask_script import Manager, Server, Command
+from flask_security import user_registered
+from cairis.core.Borg import Borg
 
 app = create_app()
 manager = Manager(app)
@@ -33,6 +36,9 @@ def apply_caching(response):
   response.headers["X-Frame-Options"] = "SAMEORIGIN"
   return response
 
+@user_registered.connect_via(app)
+def enroll(sender, user, confirm_token):
+  addAdditionalUserData(user.email,user.password)
 
 class TestClient(Command):
   def run(self):

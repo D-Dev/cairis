@@ -18,12 +18,13 @@
 from cairis.core.ARM import *
 from cairis.core.GoalAssociation import GoalAssociation
 from cairis.core.GoalAssociationParameters import GoalAssociationParameters
-from cairis.daemon.CairisHTTPError import ObjectNotFoundHTTPError, MalformedJSONHTTPError, ARMHTTPError, MissingParameterHTTPError, OverwriteNotAllowedHTTPError
+from cairis.daemon.CairisHTTPError import CairisHTTPError, ObjectNotFoundHTTPError, MalformedJSONHTTPError, ARMHTTPError, MissingParameterHTTPError, OverwriteNotAllowedHTTPError
 import cairis.core.armid
 from cairis.data.CairisDAO import CairisDAO
 from cairis.tools.ModelDefinitions import GoalAssociationModel
 from cairis.tools.SessionValidator import check_required_keys
 from cairis.tools.JsonConverter import json_serialize, json_deserialize
+import http.client 
 
 __author__ = 'Shamal Faily'
 
@@ -32,22 +33,36 @@ class GoalAssociationDAO(CairisDAO):
   def __init__(self, session_id):
     CairisDAO.__init__(self, session_id)
 
+  def get_goal_associations(self, environment_name):
+    assocs = self.db_proxy.getGoalAssociations(environment_name)
+    assocKeys = assocs.keys()
+    assocList = []
+    for key in assocKeys:
+      assoc = assocs[key]
+      del assoc.theId
+      assocList.append(assoc)
+    return assocList
+
   def get_goal_association(self, environment_name, goal_name, subgoal_name, deleteId=True):
-    assocs = self.db_proxy.goalModel(environment_name)
-    if assocs is None or len(assocs) < 1:
+    try:
+      assoc = self.db_proxy.getGoalAssociation(environment_name,goal_name,subgoal_name)
+      if (deleteId == True):
+        del assoc.theId
+      return assoc 
+    except ARMException as ex:
       self.close()
-      raise ObjectNotFoundHTTPError('Goal Associations')
-    for key in assocs:
-      envName,goalName,subGoalName,aType = key.split('/')
-      if (envName == environment_name) and (((goalName == goal_name) and (subGoalName == subgoal_name)) or ((goalName == subgoal_name) and (subGoalName == goal_name))):
-        assoc = assocs[key]
-        if (deleteId == True):
-          del assoc.theId
-        return assoc 
-    self.close()
-    raise ObjectNotFoundHTTPError('The provided goal association parameters')
+      raise ARMHTTPError(ex)
+    except ValueError as ex:
+      self.close()
+      raise CairisHTTPError(status_code=http.client.BAD_REQUEST,status="Server error",message='Error unpacking ' + key + ': ' + format(ex))
+    except Exception as ex:
+      self.close()
+      raise CairisHTTPError(status_code=http.client.BAD_REQUEST,status="Server error",message=format(ex))
 
   def add_goal_association(self, assoc):
+    if (assoc.theGoal == assoc.theSubGoal):
+      raise CairisHTTPError(status_code=http.client.BAD_REQUEST,status="Self-refinement error",message='Cannot self-refine ' + assoc.theGoal)
+
     assocParams = GoalAssociationParameters(
       envName=assoc.theEnvironmentName,
       goalName=assoc.theGoal,
@@ -57,6 +72,7 @@ class GoalAssociationDAO(CairisDAO):
       subGoalDimName=assoc.theSubGoalDimension,
       alternativeId=assoc.theAlternativeId,
       rationale=assoc.theRationale)
+
     try:
       self.db_proxy.addGoalAssociation(assocParams)
     except ARMException as ex:
@@ -65,6 +81,8 @@ class GoalAssociationDAO(CairisDAO):
 
 
   def update_goal_association(self,assoc,environment_name,goal_name,subgoal_name):
+    if (assoc.theGoal == assoc.theSubGoal):
+      raise CairisHTTPError(status_code=http.client.BAD_REQUEST,status="Self-refinement error",message='Cannot self-refine ' + assoc.theGoal)
 
     old_assoc = self.get_goal_association(environment_name,goal_name,subgoal_name,False)
     assocId = old_assoc.theId
@@ -88,7 +106,7 @@ class GoalAssociationDAO(CairisDAO):
   def delete_goal_association(self, environment_name, goal_name, subgoal_name):
     assoc = self.get_goal_association(environment_name,goal_name,subgoal_name,False)
     try:
-      self.db_proxy.deleteGoalAssociation(assoc.theId,goal_name,subgoal_name)
+      self.db_proxy.deleteGoalAssociation(assoc.theId,assoc.theGoalDimension,assoc.theSubGoalDimension)
     except ARMException as ex:
       self.close()
       raise ARMHTTPError(ex)

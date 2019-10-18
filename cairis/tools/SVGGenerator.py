@@ -94,19 +94,20 @@ def embedImage(line):
   if (line.find('<image') == 0):
     linkName = ''
     if (line.find('modelActor.png') >= 0):
-      linkName = "/assets/modelActor.png"
+      linkName = "/modelActor.png"
     elif (line.find('modelAttacker.png') >= 0):
-      linkName = "/assets/modelAttacker.png"
+      linkName = "/modelAttacker.png"
     elif (line.find('modelConflict.png') >= 0):
-      linkName = "/assets/modelConflict.png"
+      linkName = "/modelConflict.png"
     elif (line.find('modelRole.png') >= 0):
-      linkName = "/assets/modelRole.png"
+      linkName = "/modelRole.png"
     else:
       raise Exception("No relevant image link found")
     b = Borg()
-    with open(b.staticDir + linkName, "rb") as image_file:
+    imageName = b.assetDir + linkName
+    with open(imageName, "rb") as image_file:
       encoded_string = base64.b64encode(image_file.read()).decode('ascii')
-      line = line.replace(linkName,'data:image/png;base64,' + str(encoded_string))
+      line = line.replace('/assets/' + linkName,'data:image/png;base64,' + str(encoded_string))
   return line
 
 def correctTableLabel(line):
@@ -147,6 +148,9 @@ def correctHref(line, model_type):
         new_link = '/api/{0}s/shortcode/{1}'.format(type, object)
       elif (model_type == 'dataflow' and type == 'dataflow'):
         new_link = '/api/{0}s/name/{1}/environment/{2}'.format(type,object,quote(environment))
+      elif (type == 'goalassociation'):
+        assocParams = parts[1].split('/')
+        new_link = '/api/goalassociations/environment/' + quote(assocParams[0]) + '/goal/' + quote(assocParams[1]) + '/subgoal/' + quote(assocParams[2])
       else:
         if type == 'grounds': 
           new_link = '/api/{0}/name/{1}'.format(type, object)

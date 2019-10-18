@@ -128,34 +128,6 @@ class UseCaseAPITests(CairisDaemonTestCase):
     self.assertIsNotNone(reqs, 'No results after deserialization')
     self.assertEqual(new_tr.theFromName,reqs[0]);
 
-  def test_generate_obstacle_from_exception(self):
-    method = 'test_generate_obstacle_from_exception'
-    url = '/api/usecases/name/%s?session_id=test' % quote(self.existing_usecase_name)
-    rv = self.app.get(url)
-    if (sys.version_info > (3,)):
-      responseData = rv.data.decode('utf-8')
-    else:
-      responseData = rv.data
-    uc = jsonpickle.decode(responseData)
-    url = '/api/usecases/environment/Psychosis/step/' + quote('Researcher does something') + '/exception/anException/generate_obstacle?session_id=test' 
-    existing_uc_dict = {
-      'session_id': 'test',
-      'object': uc
-    }
-    rv = self.app.post(url, content_type='application/json', data=jsonpickle.encode(existing_uc_dict))
-    self.assertIsNotNone(rv.data, 'No response')
-    if (sys.version_info > (3,)):
-      responseData = rv.data.decode('utf-8')
-    else:
-      responseData = rv.data
-    json_resp = jsonpickle.decode(responseData)
-    self.assertIsNotNone(json_resp)
-    self.assertIsInstance(json_resp, dict)
-    message = json_resp.get('message', None)
-    self.assertIsNotNone(message, 'No message in response')
-    self.logger.info('[%s] Message: %s', method, message)
-    self.assertGreater(message.find('generated from exception'), -1, 'The obstacle was not generated')
-
   def test_delete(self):
     method = 'test_delete'
 
@@ -208,7 +180,8 @@ class UseCaseAPITests(CairisDaemonTestCase):
     json_resp = json_deserialize(responseData)
     self.assertIsNotNone(json_resp, 'No results after deserialization')
     ackMsg = json_resp.get('message', None)
-    self.assertEqual(ackMsg, 'Persona Characteristic successfully updated')
+    self.assertGreater(ackMsg.find('updated'),-1,'PC not updated')
+
 
 
     url = '/api/usecases'
@@ -265,7 +238,7 @@ class UseCaseAPITests(CairisDaemonTestCase):
     message = json_resp.get('message', None)
     self.assertIsNotNone(message, 'No message in response')
     self.logger.info('[%s] Message: %s', method, message)
-    self.assertGreater(message.find('successfully updated'), -1, 'The usecase was not successfully updated')
+    self.assertGreater(message.find('updated'), -1, 'The usecase was not successfully updated')
 
     rv = self.app.get('/api/usecases/name/%s?session_id=test' % quote(usecase_to_update.name()))
     if (sys.version_info > (3,)):

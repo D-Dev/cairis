@@ -46,15 +46,15 @@ class AssumptionPersonaModel:
   def buildNode(self,dimName,objtName):
     objtUrl = dimName + '#' + str(objtName)
     b = Borg()
-    actorFile = b.staticDir + '/assets/modelActor.png'
+    actorFile = b.assetDir + '/modelActor.png'
     if (dimName == 'persona'):
-      self.theGraph.add_node(pydot.Node(objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
+      self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
     elif (dimName == 'persona_characteristic'):
-      self.theGraph.add_node(pydot.Node(objtName,shape='record',margin=0,fontname=self.fontName,style='filled',fillcolor='green',fontcolor='white',fontsize=self.fontSize,URL=objtUrl))
+      self.theGraph.add_node(pydot.Node(objtName,shape='record',margin=0,fontname=self.fontName,style='filled',fillcolor='green',fontcolor='black',fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'implied_characteristic'):
       self.theGraph.add_node(pydot.Node(objtName,shape='record',margin=0,fontname=self.fontName,style='filled',fillcolor='green',fontcolor='white',fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'rebuttal'):
-      self.theGraph.add_node(pydot.Node(objtName,shape='record',margin=0,fontname=self.fontName,style='filled',fillcolor='red',fontsize=self.fontSize,URL=objtUrl))
+      self.theGraph.add_node(pydot.Node(objtName,shape='record',margin=0,fontname=self.fontName,style='filled',fillcolor='red',fontcolor='white',fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'qualifier'):
       self.theGraph.add_node(pydot.Node(objtName,shape='rectangle',margin=0,fontname=self.fontName,style='dashed',fontsize=self.fontSize,URL=objtUrl))
     elif (dimName == 'warrant'):

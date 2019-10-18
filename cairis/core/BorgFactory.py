@@ -23,28 +23,8 @@ import logging
 import json
 from cairis.tools.GraphicsGenerator import GraphicsGenerator
 from .MySQLDatabaseProxy import MySQLDatabaseProxy
+from .dba import dbtoken,canonicalDbUser,canonicalDbName
 from .ARM import ARMException
-
-def testUploadDirectory(uploadDir,logger):
-  
-  image_upload_dir = os.path.join(uploadDir, 'images')
-  if os.path.exists(image_upload_dir):
-    try:
-      test_file = os.path.join(image_upload_dir, 'test.txt')
-      fs_test = open(test_file, 'wb')
-      fs_test.write('test'.encode('utf-8'))
-      fs_test.close()
-      os.remove(test_file)
-    except IOError:
-      err_msg = 'The upload directory for images is not writeable. Image uploading will propably not work.'
-      logger.warning(err_msg)
-  else:
-    try:
-      os.mkdir(image_upload_dir, 0o775)
-    except IOError:
-      err_msg = 'Unable to create directory to store images into. Image uploading will probably not work.'
-      logger.warning(err_msg)
-
 
 def parseConfigFile():
   b = Borg()
@@ -76,7 +56,6 @@ def initialiseCairisDbSettings(cfgDict):
   b.dbName = 'cairis_test_default'
   b.tmpDir = cfgDict['tmp_dir']
   b.cairisRoot = cfgDict['root']
-  b.imageDir = os.path.abspath(cfgDict['default_image_dir'])
   b.rPasswd = ''
   b.docker = True if 'docker' in cfgDict else False
   
@@ -116,15 +95,19 @@ def initialise(user='cairis_test',db='cairis_test_default'):
   b.configDir = b.cairisRoot + '/config'
   setupDocBookConfig()
 
-  from cairis.gui.GUIDatabaseProxy import GUIDatabaseProxy
+  from cairis.legacy.GUIDatabaseProxy import GUIDatabaseProxy
   dbPasswd = ''
   if (user == 'cairis_test'):
     dbPasswd = 'cairis_test'
+    db='cairis_test_default'
   else:
+    dbPasswd = dbtoken(b.rPasswd,b.dbHost,b.dbPort,user)
+    user = canonicalDbUser(user)
     b.dbUser = user
-    b.dbPasswd = ''
+    b.dbPasswd = dbPasswd
+    db = canonicalDbName(db)
     b.dbName = db
-  b.dbProxy = GUIDatabaseProxy(user=user,passwd=dbPasswd,db=db)
+  b.dbProxy = GUIDatabaseProxy(user=user,passwd=b.dbPasswd,db=db)
   initialiseDesktopSettings()
 
 def dInitialise(withTest = True):
@@ -136,10 +119,11 @@ def dInitialise(withTest = True):
   logging.basicConfig()
   b.logger = logging.getLogger('cairisd')
   b.configDir = os.path.join(b.cairisRoot,'config')
-  b.uploadDir = cfgDict['upload_dir']
   b.secretKey = cfgDict['secret_key']
-  b.passwordHash = cfgDict['password_hash']
-  b.passwordSalt = cfgDict['password_salt']
+  b.mailServer = cfgDict['mail_server']
+  b.mailPort = cfgDict['mail_port']
+  b.mailUser = cfgDict['mail_user']
+  b.mailPasswd = cfgDict['mail_passwd']
 
   try:
     b.webPort = int(cfgDict['web_port'])
@@ -154,15 +138,17 @@ def dInitialise(withTest = True):
     b.logLevel = logging.WARNING
 
   b.staticDir = cfgDict['web_static_dir']
+
+  if ('web_asset_dir' not in cfgDict):
+    b.assetDir = b.staticDir
+  else: 
+    b.assetDir = cfgDict['web_asset_dir']
   b.templateDir = os.path.join(b.cairisRoot,'templates')
-  if not hasattr(b, 'uploadDir'): b.uploadDir = os.path.join(b.cairisRoot,'cairis/static')
 
   paths = {
     'root': b.cairisRoot,
-    'image': b.imageDir,
     'configuration files': b.configDir,
-    'template files': b.templateDir,
-    'upload': b.uploadDir
+    'template files': b.templateDir
   }
 
   for key, path in list(paths.items()):
@@ -170,8 +156,6 @@ def dInitialise(withTest = True):
       err_msg = 'The {0} directory of CAIRIS is inaccessible or not existing.{1}Path: {2}'.format(key, os.linesep, path)
       b.logger.error(err_msg)
       exit(6)
-
-  testUploadDirectory(b.uploadDir,b.logger)
 
   b.model_generator = GraphicsGenerator('svg')
 
@@ -185,6 +169,7 @@ def dInitialise(withTest = True):
     'jsonPrettyPrint': True,
     'apFontSize': '7.5',
     'dbUser': 'cairis_test',
+    'userName' : 'CAIRIS test user account',
     'dbPasswd' : 'cairis_test',
     'dbName' : 'cairis_test_default',
     'dbHost': b.dbHost,

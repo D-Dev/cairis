@@ -60,28 +60,8 @@ def importSecurityPatterns(taps,spps,vts,session_id=None):
   b = Borg()
   db_proxy = b.get_dbproxy(session_id)
 
-  msgStr = 'No patterns imported'
-  if (noOfTaps > 0):
-    tapId = 0;
-    db_proxy.deleteSecurityPattern(-1)
-    db_proxy.deleteTemplateAsset(-1)
-
-    for vt in vts:
-      db_proxy.addValueType(vt)
-
-    for tap in taps:
-      tap.setId(tapId)
-      db_proxy.addTemplateAsset(tap)
-      tapId += 1
-
-    if (noOfSpps > 0):
-      spId = 0;
-      db_proxy.deleteSecurityPattern(-1)
-      for sp in spps:
-        sp.setId(spId)
-        db_proxy.addSecurityPattern(sp)
-        spId += 1
-      msgStr =  'Imported ' + str(noOfTaps) + ' template assets and ' + str(noOfSpps) + ' security patterns'
+  db_proxy.addSecurityPatterns(vts,taps,spps)
+  msgStr =  'Imported ' + str(noOfTaps) + ' template assets and ' + str(noOfSpps) + ' security patterns'
   return msgStr
 
 def importAttackPattern(importFile,session_id = None):
@@ -172,7 +152,7 @@ def importRequirementsString(buf,session_id = None):
     xml.sax.parseString(buf,handler)
     return importRequirements(handler.domainProperties(),handler.goals(),handler.obstacles(),handler.requirements(),handler.usecases(),handler.countermeasures(),session_id = session_id)
   except xml.sax.SAXException as e:
-    raise ARMException("Error parsing" + importFile + ": " + e.getMessage())
+    raise ARMException("Error parsing imported file: " + e.getMessage())
 
 def importRequirements(dpParameterSet,goalParameterSet,obsParameterSet,reqParameterSet,ucParameterSet,cmParameterSet,session_id):
   b = Borg()
@@ -238,7 +218,7 @@ def importRequirements(dpParameterSet,goalParameterSet,obsParameterSet,reqParame
       cmParameters.setId(objtId)
       db_proxy.updateCountermeasure(cmParameters)
     cmCount += 1
-  msgStr = 'Imported ' + str(dpCount) + ' domain properties, ' + str(goalCount) + ' goals, ' + str(obsCount) + ' obstacles, ' + str(reqCount) + ' requirements, ' + str(ucCount) + 'use cases, and ' + str(cmCount) + ' countermeasures.'
+  msgStr = 'Imported ' + str(dpCount) + ' domain properties, ' + str(goalCount) + ' goals, ' + str(obsCount) + ' obstacles, ' + str(reqCount) + ' requirements, ' + str(ucCount) + ' use cases, and ' + str(cmCount) + ' countermeasures.'
   return msgStr
 
 def importRiskAnalysisFile(importFile,session_id = None):

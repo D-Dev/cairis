@@ -49,7 +49,7 @@ class CountermeasureAPITests(CairisDaemonTestCase):
     self.existing_countermeasure_type = 'Information'
     self.existing_countermeasure_description = 'X.509 certificates extended to tie client workstations so NeuroGrid tasks can only be carried out on these.'
     self.existing_environment_name = 'Psychosis'
-    self.existing_requirements = ['User certificate']
+    self.existing_requirements = ['User certificate addressability']
     self.existing_targets = [CountermeasureTarget('Certificate Ubiquity','High','Discourages certificate sharing')]
     self.existing_properties = []
     self.existing_rationale =  ['None','None','None','None','None','None','None','None']
@@ -133,7 +133,7 @@ class CountermeasureAPITests(CairisDaemonTestCase):
 
   def test_target_names(self):
     method = 'test_countermeasure-targets-by-requirement-get'
-    url = '/api/countermeasures/targets/environment/Psychosis?requirement=User%20certificate&session_id=test'
+    url = '/api/countermeasures/targets/environment/Psychosis?requirement=User%20certificate%20addressability&session_id=test'
     self.logger.info('[%s] URL: %s', method, url)
     rv = self.app.get(url)
     if (sys.version_info > (3,)):
@@ -193,7 +193,7 @@ class CountermeasureAPITests(CairisDaemonTestCase):
     message = json_resp.get('message', None)
     self.assertIsNotNone(message, 'No message in response')
     self.logger.info('[%s] Message: %s', method, message)
-    self.assertGreater(message.find('successfully updated'), -1, 'The countermeasure was not successfully updated')
+    self.assertGreater(message.find('updated'), -1, 'The countermeasure was not successfully updated')
 
     rv = self.app.get('/api/countermeasures/name/%s?session_id=test' % quote(countermeasure_to_update.name()))
     if (sys.version_info > (3,)):
@@ -224,7 +224,7 @@ class CountermeasureAPITests(CairisDaemonTestCase):
     message = json_resp.get('message', None)
     self.assertIsNotNone(message, 'No message in response')
     self.logger.info('[%s] Message: %s\n', method, message)
-    self.assertGreater(message.find('successfully generated'), -1, 'Countermeasure asset not generated')
+    self.assertGreater(message.find('created'), -1, 'Countermeasure asset not generated')
 
   def test_generate_asset_from_template(self):
     method = 'test_generate_asset_from_template'
@@ -244,7 +244,7 @@ class CountermeasureAPITests(CairisDaemonTestCase):
     message = json_resp.get('message', None)
     self.assertIsNotNone(message, 'No message in response')
     self.logger.info('[%s] Message: %s\n', method, message)
-    self.assertGreater(message.find('successfully generated'), -1, 'Countermeasure asset not generated')
+    self.assertGreater(message.find('created'), -1, 'Countermeasure asset not generated')
 
   def test_situate_countermeasure_pattern(self):
     method = 'test_situate_countermeasure_pattern'
@@ -264,7 +264,7 @@ class CountermeasureAPITests(CairisDaemonTestCase):
     message = json_resp.get('message', None)
     self.assertIsNotNone(message, 'No message in response')
     self.logger.info('[%s] Message: %s\n', method, message)
-    self.assertGreater(message.find('pattern situated'), -1, 'Security pattern not situated')
+    self.assertGreater(message.find('situated'), -1, 'Security pattern not situated')
 
   def test_associate_situated_pattern(self):
     method = 'test_situate_countermeasure_pattern'
@@ -276,7 +276,7 @@ class CountermeasureAPITests(CairisDaemonTestCase):
       responseData = rv.data
     json_resp = jsonpickle.decode(responseData)
     msg = json_resp.get('message', None)
-    self.assertEqual(msg, 'Security Pattern successfully situated')
+    self.assertEqual(msg, 'Protection Reverse Proxy situated')
 
     rv = self.app.get('api/countermeasures/name/Location-based%20X.509%20extension/candidate_patterns?session_id=test')
     if (sys.version_info > (3,)):
@@ -302,7 +302,7 @@ class CountermeasureAPITests(CairisDaemonTestCase):
     message = json_resp.get('message', None)
     self.assertIsNotNone(message, 'No message in response')
     self.logger.info('[%s] Message: %s\n', method, message)
-    self.assertGreater(message.find('pattern associated'), -1, 'Situated pattern not associated')
+    self.assertGreater(message.find('associated'), -1, 'Situated pattern not associated')
 
     rv = self.app.get('api/countermeasures/name/Location-based%20X.509%20extension/patterns?session_id=test')
     if (sys.version_info > (3,)):
@@ -327,7 +327,7 @@ class CountermeasureAPITests(CairisDaemonTestCase):
     message = json_resp.get('message', None)
     self.assertIsNotNone(message, 'No message in response')
     self.logger.info('[%s] Message: %s\n', method, message)
-    self.assertGreater(message.find('pattern removed'), -1, 'Situated pattern not removed')
+    self.assertGreater(message.find('removed'), -1, 'Situated pattern not removed')
 
     rv = self.app.get('api/countermeasures/name/Location-based%20X.509%20extension/patterns?session_id=test')
     if (sys.version_info > (3,)):

@@ -7,16 +7,21 @@ Live Demo
 A live demo of CAIRIS is available to use on https://demo.cairis.org.  The username and password you need are *test* and *test*. Internet Explorer isn't supported by CAIRIS, but it does work well with Edge, Safari, Chrome, Firefox, and Opera.
 The live demo is rebuilt every night based on the latest updates to CAIRIS, so please feel free to add, update, or remove elements in the example models, or even create new CAIRIS databases.  
 
+Video tutorials
+---------------
+
+The `CAIRIS YouTube channel <https://m.youtube.com/channel/UC21MvLyGwF9S0f9XlMLBA9Q>`_ has several short video primers.  These include an overview of the UI, and guidance on using CAIRIS for different design activities.
+
 
 Example models
 --------------
 
-The live demo comes with two example models: `NeuroGrid <http://cairis.readthedocs.io/en/latest/examples.html#neurogrid>`_ and `ACME Water <http://cairis.readthedocs.io/en/latest/examples.html#acme-water>`_.  To open these, select the System / Open Database menu, and choose the model to open. We would strongly suggest taking a look at these to quickly see how security, usability, and requirements concepts in CAIRIS fit together.
+The live demo comes with three example models: `NeuroGrid <https://cairis.readthedocs.io/en/latest/examples.html#neurogrid>`_ , `ACME Water <https://cairis.readthedocs.io/en/latest/examples.html#acme-water>`_, and `webinos <https://cairis.readthedocs.io/en/latest/examples.html#webinos>`_.  To open these, select the System / Open Database menu, and choose the model to open. We would strongly suggest taking a look at these to quickly see how security, usability, and requirements concepts in CAIRIS fit together.
 
 Define your contexts of use
 ---------------------------
 
-How you use CAIRIS depends on how you approach the early stages of your design.  You will, however, need to create  :doc:`environments </environments>` to represent your contexts of use.  If you haven't thought about what these are yet, just create a single environment to begin with.  You can add more later.
+How you use CAIRIS depends on how you approach the early stages of your design.  You will, however, need to work with  :doc:`environments </environments>` to represent your contexts of use.  Each model comes with a *Default* environment, but you may wish to add more later as you learn more about different contexts.
 
 Save early and often
 ----------------------
@@ -52,8 +57,3 @@ Generating documentation
 ------------------------
 
 Your stakeholders may not want to work directly with CAIRIS, so you can :doc:`generate documentation </gendoc>` to share your design documentation with others.
-
-Any questions / issues
-----------------------
-
-Please raise an issue in GitHub.

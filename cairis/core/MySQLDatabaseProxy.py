@@ -18,7 +18,7 @@
 
 from .Borg import Borg
 import MySQLdb
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError, DataError, IntegrityError
 from . import RequirementFactory
 from .Environment import Environment
 from .ARM import *
@@ -106,67 +106,17 @@ from .DataFlow import DataFlow
 from .DataFlowParameters import DataFlowParameters
 from .TrustBoundary import TrustBoundary
 from .ValidationResult import ValidationResult
+from cairis.tools.PseudoClasses import RiskRating
 import string
 import os
 from numpy import *
 from sqlalchemy import create_engine
 from sqlalchemy.orm import scoped_session, sessionmaker
 import sys
+from base64 import b64encode
+from .dba import canonicalDbUser, canonicalDbName, createDatabaseSchema, createDefaults, createDatabaseAndPrivileges, databases
 
 __author__ = 'Shamal Faily, Robin Quetin, Nathan Jenkins'
-
-def createDatabaseSchema(rootDir,dbHost,dbPort,dbUser,dbPasswd,dbName):
-  srcDir = rootDir + '/sql'
-  initSql = srcDir + '/init.sql'
-  procsSql = srcDir + '/procs.sql'
-  cmd = '/usr/bin/mysql -h ' + dbHost + ' --port=' + str(dbPort) + ' --user ' + dbUser + ' --password=\'' + dbPasswd + '\'' + ' --database ' + dbName + ' < ' + initSql
-  os.system(cmd)
-  cmd = '/usr/bin/mysql -h ' + dbHost + ' --port=' + str(dbPort) + ' --user ' + dbUser + ' --password=\'' + dbPasswd + '\'' + ' --database ' + dbName + ' < ' + procsSql
-  os.system(cmd)
-
-def createDatabaseAccount(rPasswd,dbHost,dbPort,dbUser,dbPasswd):
-  try:
-    rootConn = MySQLdb.connect(host=dbHost,port=int(dbPort),user='root',passwd=rPasswd)
-    rootCursor = rootConn.cursor()
-    stmts = ['drop user if exists ' + dbUser,
-             "create user if not exists '" + dbUser + "'@'" + "%' identified by '" + dbPasswd + "'",
-             'flush privileges']
-    for stmt in stmts:
-      rootCursor.execute(stmt)
-    rootCursor.close()
-    rootConn.close()
-  except OperationalError as e:
-    exceptionText = 'MySQL error creating database account ' + dbUser + ' (message:' + format(e) + ')'
-    raise DatabaseProxyException(exceptionText) 
-  except _mysql_exceptions.DatabaseError as e:
-    id,msg = e
-    exceptionText = 'MySQL error creating database account ' + dbUser + ' (id:' + str(id) + ',message:' + msg
-    raise DatabaseProxyException(exceptionText) 
-
-def createDatabaseAndPrivileges(rPasswd,dbHost,dbPort,dbUser,dbPasswd,dbName):
-  try:
-    rootConn = MySQLdb.connect(host=dbHost,port=int(dbPort),user='root',passwd=rPasswd)
-    rootCursor = rootConn.cursor()
-    stmts = ['drop database if exists `' + dbName + '`',
-             'create database ' + dbName,
-             "grant all privileges on `" + dbName + "`.* TO '" + dbUser + "'@'%'",
-             'alter database ' + dbName + ' default character set utf8',
-             'alter database ' + dbName + ' default collate utf8_general_ci',
-             'flush tables',
-             'flush privileges']
-    for stmt in stmts:
-      rootCursor.execute(stmt)
-    rootCursor.close()
-    rootConn.close()
-  except OperationalError as e:
-    exceptionText = 'MySQL error creating CAIRIS database ' + dbName + ' on host ' + dbHost + ' at port ' + str(dbPort) + ' with user ' + dbUser + ' (message:' + format(e) + ')'
-    id,msg = e
-    exceptionText = 'MySQL error creating CAIRIS database ' + dbName + ' on host ' + dbHost + ' at port ' + str(dbPort) + ' with user ' + dbUser + ' (id:' + str(id) + ',message:' + msg
-    raise DatabaseProxyException(exceptionText) 
-  except _mysql_exceptions.DatabaseError as e:
-    id,msg = e
-    exceptionText = 'MySQL error creating CAIRIS database ' + dbName + ' on host ' + dbHost + ' at port ' + str(dbPort) + ' with user ' + dbUser + ' (id:' + str(id) + ',message:' + msg
-    raise DatabaseProxyException(exceptionText) 
 
 class MySQLDatabaseProxy:
   def __init__(self, host=None, port=None, user=None, passwd=None, db=None):
@@ -179,7 +129,7 @@ class MySQLDatabaseProxy:
     port = b.dbPort
 
     try:
-      dbEngine = create_engine('mysql+mysqldb://'+user+':'+passwd+'@'+host+':'+str(port)+'/'+db+'?charset=utf8')
+      dbEngine = create_engine('mysql+mysqldb://'+user+':'+passwd+'@'+host+':'+str(port)+'/'+db+'?charset=utf8mb4')
       self.conn = scoped_session(sessionmaker(bind=dbEngine))
       self.conn.execute("set session max_sp_recursion_depth = 255")
     except OperationalError as e:
@@ -196,25 +146,34 @@ class MySQLDatabaseProxy:
     try:
       if (closeConn) and self.conn.connection().connection.open:
         self.conn.close()
-      if b.runmode == 'desktop':
-        dbEngine = create_engine('mysql+mysqldb://'+b.dbUser+':'+b.dbPasswd+'@'+b.dbHost+':'+str(b.dbPort)+'/'+b.dbName+'?charset=utf8')
-        self.conn = scoped_session(sessionmaker(bind=dbEngine))
-        self.conn.execute("set session max_sp_recursion_depth = 255")
-      elif b.runmode == 'web':
+
+      if b.runmode == 'web':
         ses_settings = b.get_settings(session_id)
-        dbEngine = create_engine('mysql+mysqldb://'+ses_settings['dbUser']+':'+ses_settings['dbPasswd']+'@'+ses_settings['dbHost']+':'+str(ses_settings['dbPort'])+'/'+ses_settings['dbName']+'?charset=utf8')
+        dbUser = ses_settings['dbUser']
+        dbPasswd = ses_settings['dbPasswd']
+        dbHost = ses_settings['dbHost']
+        dbPort = ses_settings['dbPort']
+        dbName = ses_settings['dbName']
+        dbEngine = create_engine('mysql+mysqldb://' + dbUser+':' + dbPasswd+'@' + dbHost+':' + str(dbPort)+'/' + dbName + '?charset=utf8mb4')
         self.conn = scoped_session(sessionmaker(bind=dbEngine))
-        self.conn.execute("set session max_sp_recursion_depth = 255")
+      elif b.runmode == 'desktop':
+        dbEngine = create_engine('mysql+mysqldb://' + b.dbUser+':' + b.dbPasswd+'@' + b.dbHost+':' + str(b.dbPort)+'/' + b.dbName + '?charset=utf8mb4')
+        self.conn = scoped_session(sessionmaker(bind=dbEngine))
       else:
         raise RuntimeError('Run mode not recognized')
+      self.conn.execute("set session max_sp_recursion_depth = 255")
+
     except OperationalError as e:
-      exceptionText = 'MySQL error re-connecting to the CAIRIS database ' + b.dbName + ' on host ' + b.dbHost + ' at port ' + str(b.dbPort) + ' with user ' + b.dbUser + ' (message:' + format(e) + ')'
+      exceptionText = 'MySQL error re-connecting to the CAIRIS database: ' + format(e)
+      raise DatabaseProxyException(exceptionText) 
+    except ProgrammingError as e:
+      exceptionText = 'MySQL error re-connecting to the CAIRIS database: ' + format(e)
       raise DatabaseProxyException(exceptionText) 
     except _mysql_exceptions.IntegrityError as e:
-      exceptionText = 'MySQL error re-connecting to the CAIRIS database ' + b.dbName + ' on host ' + b.dbHost + ' at port ' + str(b.dbPort) + ' with user ' + b.dbUser + ' (id:' + str(id) + ',message:' + format(e)
+      exceptionText = 'MySQL error re-connecting to the CAIRIS database: ' + format(e)
       raise DatabaseProxyException(exceptionText) 
     except _mysql_exceptions.DatabaseError as e:
-      exceptionText = 'MySQL error re-connecting to the CAIRIS database ' + b.dbName + ' on host ' + b.dbHost + ' at port ' + str(b.dbPort) + ' with user ' + b.dbUser + ' (id:' + str(id) + ',message:' + format(e)
+      exceptionText = 'MySQL error re-connecting to the CAIRIS database: ' + format(e)
       raise DatabaseProxyException(exceptionText) 
     self.theDimIdLookup, self.theDimNameLookup = self.buildDimensionLookup()
 
@@ -281,6 +240,9 @@ class MySQLDatabaseProxy:
       else:
         return session
     except OperationalError as e:
+      exceptionText = 'Update error (message:' + format(e) + ')'
+      raise DatabaseProxyException(exceptionText) 
+    except IntegrityError as e:
       exceptionText = 'Update error (message:' + format(e) + ')'
       raise DatabaseProxyException(exceptionText) 
     except _mysql_exceptions.DatabaseError as e:
@@ -372,10 +334,15 @@ class MySQLDatabaseProxy:
     except OperationalError as e:
       exceptionText = 'MySQL error calling ' + callTxt + ' (message:' + format(e) + ')'
       raise DatabaseProxyException(exceptionText) 
+    except DataError as e:
+      exceptionText = 'MySQL error calling ' + callTxt + ' (message:' + format(e) + ')'
+      raise DatabaseProxyException(exceptionText) 
     except _mysql_exceptions.DatabaseError as e:
       id,msg = e
       exceptionText = errorTxt + ' (id:' + str(id) + ',message:' + msg + ')'
       raise DatabaseProxyException(exceptionText) 
+    except ProgrammingError as e:
+      raise DatabaseProxyException(format(e)) 
 
   def getEnvironments(self,constraintId = -1):
     envRows = self.responseList('call getEnvironments(:id)',{'id':constraintId},'MySQL error getting environments')
@@ -453,8 +420,11 @@ class MySQLDatabaseProxy:
       self.addDimensionRoles(attackerId,'attacker',environmentName,environmentProperties.roles())
     return attackerId
 
-  def addDimensionEnvironment(self,dimId,table,environmentName):
-    self.updateDatabase('call add_' + table + '_environment(:id,:name)',{'id':dimId,'name':environmentName},'MySQL error associating ' + table + ' id ' + str(dimId) + ' with environment ' + environmentName)
+  def addDimensionEnvironment(self,dimId,table,environmentName,session = None):
+    if (session != None):
+      self.updateDatabase('call add_' + table + '_environment(:id,:name)',{'id':dimId,'name':environmentName},'MySQL error associating ' + table + ' id ' + str(dimId) + ' with environment ' + environmentName,session)
+    else:
+      self.updateDatabase('call add_' + table + '_environment(:id,:name)',{'id':dimId,'name':environmentName},'MySQL error associating ' + table + ' id ' + str(dimId) + ' with environment ' + environmentName)
 
   def addAttackerMotives(self,attackerId,environmentName,motives):
     for motive in motives:
@@ -501,7 +471,7 @@ class MySQLDatabaseProxy:
     assetCriticalRationale = parameters.criticalRationale()
     tags = parameters.tags()
     ifs = parameters.interfaces()
-    self.updateDatabase('call addAsset(:id,:name,:sc,:desc,:sig,:type,:c,:cr)',{'id':assetId,'name':assetName,'sc':shortCode,'desc':assetDesc.encode('utf-8'),'sig':assetSig.encode('utf-8'),'type':assetType,'c':assetCriticality,'cr':assetCriticalRationale},'MySQL error adding asset')
+    self.updateDatabase('call addAsset(:id,:name,:sc,:desc,:sig,:type,:c,:cr)',{'id':assetId,'name':assetName,'sc':shortCode,'desc':assetDesc,'sig':assetSig,'type':assetType,'c':assetCriticality,'cr':assetCriticalRationale},'MySQL error adding asset')
     self.addTags(assetName,'asset',tags)
     self.addInterfaces(assetName,'asset',ifs)
     for cProperties in parameters.environmentProperties():
@@ -687,7 +657,7 @@ class MySQLDatabaseProxy:
     objtRows = self.responseList('call getPersonaCharacteristicsSummary()',{},'MySQL error getting persona characteristics summary')
     rows = []
     for objtName, objtVar, objtChar in objtRows:
-      rows.append(ObjectSummary(objtName,variable=objtVar,characteristic=objtChar))
+      rows.append(ObjectSummary(objtChar,variable=objtVar,characteristic=objtName))
     return rows
 
 
@@ -719,6 +689,8 @@ class MySQLDatabaseProxy:
       return self.theDimNameLookup[dimensionName]
     if dimensionTable == 'linkand':
       dimensionTable = 'goalassociation'
+    if dimensionTable == 'security_pattern':
+      dimensionTable = 'securitypattern'
     try:
       session = self.conn()
       sqlText = ''
@@ -732,7 +704,6 @@ class MySQLDatabaseProxy:
         cName,ifName = dimensionName.split('_')
         rs = session.execute('select interfaceId(:name)',{'name':ifName})
       else:
-        dimensionName = self.conn.connection().connection.escape_string(dimensionName)
         rs = session.execute('call dimensionId(:name,:table)',{'name':dimensionName,'table':dimensionTable})
 
       if (rs.rowcount == 0):
@@ -749,6 +720,9 @@ class MySQLDatabaseProxy:
       rs.close()
       session.close()
       return dimId
+    except ValueError as e:
+      exceptionText = 'Error splitting ' + dimensionName + ': ' + format(e)
+      raise DatabaseProxyException(exceptionText) 
     except OperationalError as e:
       exceptionText = 'MySQL error getting '
       exceptionText += dimensionTable + ' (message:' + format(e) + ')'
@@ -787,7 +761,7 @@ class MySQLDatabaseProxy:
     threatType = parameters.type()
     threatMethod = parameters.method()
     tags = parameters.tags()
-    session = self.updateDatabase("call addThreat(:id,:name,:type,:method)",{'id':threatId,'name':threatName,'type':threatType,'method':threatMethod.encode('utf-8')},'MySQL error adding threat',None,False)
+    session = self.updateDatabase("call addThreat(:id,:name,:type,:method)",{'id':threatId,'name':threatName,'type':threatType,'method':threatMethod},'MySQL error adding threat',None,False)
     self.addTags(threatName,'threat',tags)
     for cProperties in parameters.environmentProperties():
       environmentName = cProperties.name()
@@ -811,7 +785,7 @@ class MySQLDatabaseProxy:
     tags = parameters.tags()
 
     session = self.updateDatabase('call deleteThreatComponents(:id)',{'id':threatId},'MySQL error deleting threat components',None,False)
-    self.updateDatabase('call updateThreat(:id,:name,:type,:method)',{'id':threatId,'name':threatName,'type':threatType,'method':threatMethod.encode('utf-8')},'MySQL error updating threat',session,False)
+    self.updateDatabase('call updateThreat(:id,:name,:type,:method)',{'id':threatId,'name':threatName,'type':threatType,'method':threatMethod},'MySQL error updating threat',session,False)
     self.addTags(threatName,'threat',tags)
 
     for cProperties in parameters.environmentProperties():
@@ -858,7 +832,7 @@ class MySQLDatabaseProxy:
     vulType = parameters.type()
     tags = parameters.tags()
     vulId = self.newId()
-    session = self.updateDatabase('call addVulnerability(:id,:name,:desc,:type)',{'id':vulId,'name':vulName,'desc':vulDesc.encode('utf-8'),'type':vulType},'MySQL error adding vulnerabilitity',None,False)
+    session = self.updateDatabase('call addVulnerability(:id,:name,:desc,:type)',{'id':vulId,'name':vulName,'desc':vulDesc,'type':vulType},'MySQL error adding vulnerabilitity',None,False)
     self.addTags(vulName,'vulnerability',tags)
     for cProperties in parameters.environmentProperties():
       environmentName = cProperties.name()
@@ -878,7 +852,7 @@ class MySQLDatabaseProxy:
     tags = parameters.tags()
 
     session = self.updateDatabase('call deleteVulnerabilityComponents(:id)',{'id':vulId},'MySQL error deleting vulnerability components',None,False)
-    self.updateDatabase('call updateVulnerability(:id,:name,:desc,:type)',{'id':vulId,'name':vulName,'desc':vulDesc.encode('utf-8'),'type':vulType},'MySQL error updating vulnerability',session,False)
+    self.updateDatabase('call updateVulnerability(:id,:name,:desc,:type)',{'id':vulId,'name':vulName,'desc':vulDesc,'type':vulType},'MySQL error updating vulnerability',session,False)
     self.addTags(vulName,'vulnerability',tags)
     for cProperties in parameters.environmentProperties():
       environmentName = cProperties.name()
@@ -959,13 +933,13 @@ class MySQLDatabaseProxy:
     pType = parameters.type()
     codes = parameters.codes()
     tags = parameters.tags()
-    self.updateDatabase('call addPersona(:id,:name,:act,:att,:apt,:mot,:skills,:intr,:cont,:img,:ass,:type)',{'id':personaId,'name':personaName,'act':activities.encode('utf-8'),'att':attitudes.encode('utf-8'),'apt':aptitudes.encode('utf-8'),'mot':motivations.encode('utf-8'),'skills':skills.encode('utf-8'),'intr':intrinsic.encode('utf-8'),'cont':contextual.encode('utf-8'),'img':image,'ass':isAssumption,'type':pType},'MySQL error adding persona')
+    self.updateDatabase('call addPersona(:id,:name,:act,:att,:apt,:mot,:skills,:intr,:cont,:img,:ass,:type)',{'id':personaId,'name':personaName,'act':activities,'att':attitudes,'apt':aptitudes,'mot':motivations,'skills':skills,'intr':intrinsic,'cont':contextual,'img':image,'ass':isAssumption,'type':pType},'MySQL error adding persona')
     self.addPersonaCodes(personaName,codes)
     self.addTags(personaName,'persona',tags)
     for environmentProperties in parameters.environmentProperties():
       environmentName = environmentProperties.name()
       self.addDimensionEnvironment(personaId,'persona',environmentName)
-      self.addPersonaNarrative(personaId,environmentName,environmentProperties.narrative().encode('utf-8'))
+      self.addPersonaNarrative(personaId,environmentName,environmentProperties.narrative())
       self.addPersonaDirect(personaId,environmentName,environmentProperties.directFlag())
       self.addDimensionRoles(personaId,'persona',environmentName,environmentProperties.roles())
       self.addPersonaEnvironmentCodes(personaName,environmentName,environmentProperties.codes())
@@ -994,13 +968,13 @@ class MySQLDatabaseProxy:
     tags = parameters.tags()
 
     session = self.updateDatabase('call deletePersonaComponents(:id)',{'id':personaId},'MySQL error deleting persona components',None,False)
-    self.updateDatabase('call updatePersona(:id,:name,:act,:att,:apt,:mot,:skills,:intr,:cont,:img,:ass,:type)',{'id':personaId,'name':personaName,'act':activities.encode('utf-8'),'att':attitudes.encode('utf-8'),'apt':aptitudes.encode('utf-8'),'mot':motivations.encode('utf-8'),'skills':skills.encode('utf-8'),'intr':intrinsic.encode('utf-8'),'cont':contextual.encode('utf-8'),'img':image,'ass':isAssumption,'type':pType},'MySQL error updating database',session)
+    self.updateDatabase('call updatePersona(:id,:name,:act,:att,:apt,:mot,:skills,:intr,:cont,:img,:ass,:type)',{'id':personaId,'name':personaName,'act':activities,'att':attitudes,'apt':aptitudes,'mot':motivations,'skills':skills,'intr':intrinsic,'cont':contextual,'img':image,'ass':isAssumption,'type':pType},'MySQL error updating database',session)
     self.addPersonaCodes(personaName,codes)
     self.addTags(personaName,'persona',tags)
     for environmentProperties in parameters.environmentProperties():
       environmentName = environmentProperties.name()
       self.addDimensionEnvironment(personaId,'persona',environmentName)
-      self.addPersonaNarrative(personaId,environmentName,environmentProperties.narrative().encode('utf-8'))
+      self.addPersonaNarrative(personaId,environmentName,environmentProperties.narrative())
       self.addPersonaDirect(personaId,environmentName,environmentProperties.directFlag())
       self.addDimensionRoles(personaId,'persona',environmentName,environmentProperties.roles())
       self.addPersonaEnvironmentCodes(personaName,environmentName,environmentProperties.codes())
@@ -1037,27 +1011,60 @@ class MySQLDatabaseProxy:
       risk = self.misuseCaseRisk(mcId)
       environmentProperties = []
       for environmentId,environmentName in self.dimensionEnvironments(mcId,'misusecase'):
-        narrative = self.misuseCaseNarrative(mcId,environmentId)
-        properties = MisuseCaseEnvironmentProperties(environmentName,narrative)
-        environmentProperties.append(properties)
+        riskId = self.getDimensionId(risk,'risk')
+        mcEnv = self.misuseCaseEnvironment(environmentName,mcId,riskId,environmentId)
+        environmentProperties.append(mcEnv)
       parameters = MisuseCaseParameters(mcName,environmentProperties,risk)
       mc = ObjectFactory.build(mcId,parameters)
       mcs[mcName] = mc
     return mcs
 
-  def riskMisuseCase(self,riskId):
-    rows = self.responseList('call riskMisuseCase(:id)',{'id':riskId},'MySQL error getting risk misuse case')
+  def misuseCaseEnvironment(self,envName,mcId,riskId,envId,thrName = '',vulName = ''):
+    narrative = self.misuseCaseNarrative(mcId,envId)
+    mcEnv = MisuseCaseEnvironmentProperties(envName,narrative)
+    if (thrName != '' and vulName != ''):
+      mcEnv.theRiskRating = RiskRating(thrName,vulName,envName,self.riskRating(riskId,thrName,vulName,envName))
+      threatId = self.getDimensionId(thrName,'threat')
+      vulId = self.getDimensionId(vulName,'vulnerability')
+      mcEnv.theLikelihood = self.threatLikelihood(threatId,envId)
+      mcEnv.theSeverity = self.vulnerabilitySeverity(vulId,envId)
+      mcEnv.theAttackers = self.threatAttackers(threatId,envId)
+      threatenedAssets = self.threatenedAssets(threatId,envId)
+      vulnerableAssets = self.vulnerableAssets(vulId,envId)
+
+      mcEnv.theObjective = 'Exploit vulnerabilities in '
+      for idx,vulAsset in enumerate(vulnerableAssets):
+        mcEnv.theObjective += vulAsset
+        if (idx != (len(vulnerableAssets) -1)):
+          mcEnv.theObjective += ','
+      mcEnv.theObjective += ' to threaten '
+      for idx,thrAsset in enumerate(threatenedAssets):
+        mcEnv.theObjective += thrAsset
+        if (idx != (len(threatenedAssets) -1)):
+          mcEnv.theObjective += ','
+      mcEnv.theObjective += '.'
+      mcEnv.theAssets = set(threatenedAssets + vulnerableAssets)
+    return mcEnv
+
+
+  def riskMisuseCase(self,riskId,thrName = '',vulName = ''):
+    rows = []
+    if (thrName != '' and vulName != ''):
+      rows = self.responseList('call riskMisuseCaseByTV(:threat,:vulnerability)',{'threat':thrName,'vulnerability':vulName},'MySQL error getting risk misuse case')
+    else:
+      rows = self.responseList('call riskMisuseCase(:id)',{'id':riskId},'MySQL error getting risk misuse case')
     if (len(rows) == 0): return None
     else:
       row = rows[0]
       mcId = row[0]
       mcName = row[1]
       risk = self.misuseCaseRisk(mcId)
+      if (riskId == -1):
+        riskId = self.getDimensionId(risk,'risk')
       environmentProperties = []
       for environmentId,environmentName in self.dimensionEnvironments(riskId,'risk'):
-        narrative = self.misuseCaseNarrative(mcId,environmentId)
-        properties = MisuseCaseEnvironmentProperties(environmentName,narrative)
-        environmentProperties.append(properties)
+        mcEnv = self.misuseCaseEnvironment(environmentName,mcId,riskId,environmentId,thrName,vulName)
+        environmentProperties.append(mcEnv)
       parameters = MisuseCaseParameters(mcName,environmentProperties,risk)
       mc = ObjectFactory.build(mcId,parameters)
       return mc
@@ -1090,21 +1097,21 @@ class MySQLDatabaseProxy:
         self.addTaskAssets(taskId,taskAssets,environmentName)
       self.addTaskPersonas(taskId,cProperties.personas(),environmentName)
       self.addTaskConcernAssociations(taskId,environmentName,cProperties.concernAssociations())
-      self.addTaskNarrative(taskId,cProperties.narrative().encode('utf-8'),cProperties.consequences().encode('utf-8'),cProperties.benefits().encode('utf-8'),environmentName)
+      self.addTaskNarrative(taskId,cProperties.narrative(),cProperties.consequences(),cProperties.benefits(),environmentName)
       self.addTaskEnvironmentCodes(taskName,environmentName,cProperties.codes())
     return taskId
 
-  def addMisuseCase(self,parameters):
+  def addMisuseCase(self,parameters,session):
     parameters.validate()
     mcName = parameters.name()
     mcId = self.newId()
-    self.updateDatabase('call addMisuseCase(:id,:name)',{'id':mcId,'name':mcName},'MySQL error adding misuse case ' + mcName)
-    self.addMisuseCaseRisk(mcId,parameters.risk())
+    self.updateDatabase('call addMisuseCase(:id,:name)',{'id':mcId,'name':mcName},'MySQL error adding misuse case ' + mcName,session)
+    self.addMisuseCaseRisk(mcId,parameters.risk(),session)
     for cProperties in parameters.environmentProperties():
       cProperties.validate()
       environmentName = cProperties.name()
-      self.addDimensionEnvironment(mcId,'misusecase',environmentName)
-      self.addMisuseCaseNarrative(mcId,cProperties.narrative().encode('utf-8'),environmentName)
+      self.addDimensionEnvironment(mcId,'misusecase',environmentName,session)
+      self.addMisuseCaseNarrative(mcId,cProperties.narrative(),environmentName,session)
     return mcId
 
 
@@ -1128,21 +1135,21 @@ class MySQLDatabaseProxy:
       taskAssets = cProperties.assets()
       if (len(taskAssets) > 0):
         self.addTaskAssets(taskId,taskAssets,environmentName)
-      self.addTaskNarrative(taskId,cProperties.narrative().encode('utf-8'),cProperties.consequences().encode('utf-8'),cProperties.benefits().encode('utf-8'),environmentName)
+      self.addTaskNarrative(taskId,cProperties.narrative(),cProperties.consequences(),cProperties.benefits(),environmentName)
       self.addTaskEnvironmentCodes(taskName,environmentName,cProperties.codes())
 
-  def updateMisuseCase(self,parameters):
+  def updateMisuseCase(self,parameters,session):
     parameters.validate()
     mcId = parameters.id()
     mcName = parameters.name()
-    session = self.updateDatabase('call deleteMisuseCaseComponents(:id)',{'id':mcId},'MySQL error dleting misuse case components',None,False)
-    self.updateDatabase('call updateMisuseCase(:id,:name)',{'id':mcId,'name':mcName},'MySQL error updating misuse case',session)
-    self.addMisuseCaseRisk(mcId,parameters.risk())
+    self.updateDatabase('call deleteMisuseCaseComponents(:id)',{'id':mcId},'MySQL error dleting misuse case components',session,False)
+    self.updateDatabase('call updateMisuseCase(:id,:name)',{'id':mcId,'name':mcName},'MySQL error updating misuse case',session,False)
+    self.addMisuseCaseRisk(mcId,parameters.risk(),session)
     for cProperties in parameters.environmentProperties():
       cProperties.validate()
       environmentName = cProperties.name()
-      self.addDimensionEnvironment(mcId,'misusecase',environmentName)
-      self.addMisuseCaseNarrative(mcId,cProperties.narrative().encode('utf-8'),environmentName)
+      self.addDimensionEnvironment(mcId,'misusecase',environmentName,session)
+      self.addMisuseCaseNarrative(mcId,cProperties.narrative(),environmentName,session)
 
 
   def addTaskPersonas(self,taskId,personas,environmentName):
@@ -1157,8 +1164,8 @@ class MySQLDatabaseProxy:
       self.updateDatabase('call addTaskAsset(:tId,:ass,:env)',{'tId':taskId,'ass':asset,'env':environmentName},'MySQL error adding task asset',session,False)
     self.commitDatabase(session)
 
-  def addMisuseCaseRisk(self,mcId,riskName):
-    self.updateDatabase('call addMisuseCaseRisk(:id,:risk)',{'id':mcId,'risk':riskName},'MySQL error associating risk with misuse case')
+  def addMisuseCaseRisk(self,mcId,riskName,session):
+    self.updateDatabase('call addMisuseCaseRisk(:id,:risk)',{'id':mcId,'risk':riskName},'MySQL error associating risk with misuse case',session,False)
 
   def deleteTask(self,taskId):
     self.deleteObject(taskId,'task')
@@ -1210,11 +1217,12 @@ class MySQLDatabaseProxy:
     riskId = self.newId()
     riskName = parameters.name()
     inTxt = parameters.intent()
-    self.updateDatabase('call addRisk(:threat,:vuln,:rId,:risk,:txt)',{'threat':threatName,'vuln':vulName,'rId':riskId,'risk':riskName,'txt':inTxt},'MySQL error adding risk')
+    session = self.updateDatabase('call addRisk(:threat,:vuln,:rId,:risk,:txt)',{'threat':threatName,'vuln':vulName,'rId':riskId,'risk':riskName,'txt':inTxt},'MySQL error adding risk',None,False)
     mc = parameters.misuseCase()
     mcParameters = MisuseCaseParameters(mc.name(),mc.environmentProperties(),mc.risk())
-    self.addMisuseCase(mcParameters)
+    self.addMisuseCase(mcParameters,session)
     self.addTags(riskName,'risk',tags)
+    self.commitDatabase(session)
     return riskId
 
   def updateRisk(self,parameters):
@@ -1224,15 +1232,17 @@ class MySQLDatabaseProxy:
     tags = parameters.tags()
     riskName = parameters.name()
     inTxt = parameters.intent()
-    self.updateDatabase('call updateRisk(:threat,:vuln,:rId,:risk,:txt)',{'threat':threatName,'vuln':vulName,'rId':riskId,'risk':riskName,'txt':inTxt},'MySQL error updating risk')
-    self.addTags(riskName,'risk',tags)
+    session = self.updateDatabase('call updateRisk(:threat,:vuln,:rId,:risk,:txt)',{'threat':threatName,'vuln':vulName,'rId':riskId,'risk':riskName,'txt':inTxt},'MySQL error updating risk',None,False)
+    self.commitDatabase(session)
 
     mc = parameters.misuseCase()
     mcName = 'Exploit ' + riskName
     mcId,oldMcName = self.responseList('call riskMisuseCase(:id)',{'id':riskId},'MySQL error getting risk misuse case')[0]
     mcParameters = MisuseCaseParameters(mcName,mc.environmentProperties(),riskName)
     mcParameters.setId(mcId)
-    self.updateMisuseCase(mcParameters)
+    self.updateMisuseCase(mcParameters,session)
+    self.addTags(riskName,'risk',tags)
+    self.commitDatabase(session)
 
   def deleteRisk(self,riskId):
     self.deleteObject(riskId,'risk')
@@ -1398,10 +1408,10 @@ class MySQLDatabaseProxy:
   def removableTraces(self,environmentName):
     traceRows = self.responseList('call viewRemovableTraces(:env)',{'env':environmentName},'MySQL error getting removable trace relations')
     traces = []
-    for fromObjt,fromName,toObjt,toName in traceRows:
+    for fromObjt,fromName,toObjt,toName,lbl in traceRows:
       if (fromObjt == 'task' and toObjt == 'asset'):
         continue
-      traces.append((fromObjt,fromName,toObjt,toName))
+      traces.append((fromObjt,fromName,toObjt,toName,lbl))
     return traces
 
   def allowableTraceDimension(self,fromId,toId):
@@ -1413,6 +1423,8 @@ class MySQLDatabaseProxy:
   def deleteDependencies(self,deps):
     for dep in deps:
       dimName = dep[0]
+      if (dimName == 'architectural_pattern'):
+        dimName = 'component_view'
       objtId = dep[1]
       self.deleteObject(objtId,dimName)
     
@@ -1423,13 +1435,13 @@ class MySQLDatabaseProxy:
   def vulnerableAssets(self,vulId,environmentId):
     return self.responseList('call vulnerability_asset(:vId,:eId)',{'vId':vulId,'eId':environmentId},'MySQL error getting assets associated with vulnerability id ' + str(vulId) + ' in environment id ' + str(environmentId))
 
-  def addTrace(self,traceTable,fromId,toId,contributionType = 'and'):
+  def addTrace(self,traceTable,fromId,toId,label = 'supports'):
     if (traceTable != 'requirement_task' and traceTable != 'requirement_usecase' and traceTable != 'requirement_requirement'):
       self.updateDatabase('insert into ' + traceTable + ' values(:fromId,:toId)',{'fromId':fromId,'toId':toId},'MySQL error adding trace')
     elif (traceTable == 'requirement_requirement'):
-      self.updateDatabase('insert into ' + traceTable + ' values(:fromId,:toId,":contType")',{'fromId':fromId,'toId':toId,'contType':contributionType},'MySQL error adding trace')
+      self.updateDatabase('insert into ' + traceTable + ' values(:fromId,:toId,":label")',{'fromId':fromId,'toId':toId,'label':label},'MySQL error adding trace')
     else:
-      refTypeId = self.getDimensionId(contributionType,'reference_type')
+      refTypeId = self.getDimensionId(label,'reference_type')
       self.updateDatabase('insert into ' + traceTable + ' values(:fromId,:toId,:refTypeId)',{'fromId':fromId,'toId':toId,'refTypeId':refTypeId},'MySQL error adding trace')
 
   def deleteEnvironment(self,environmentId):
@@ -1450,8 +1462,8 @@ class MySQLDatabaseProxy:
       exceptionText = 'MySQL error deleting environments (' + str(e) + ')'
       raise DatabaseProxyException(exceptionText)  
 
-  def riskRating(self,thrName,vulName,environmentName):
-    return self.responseList('call riskRating(:thr,:vuln,:env)',{'thr':thrName,'vuln':vulName,'env':environmentName},'MySQL error rating risk associated with threat/vulnerability/environment ' + thrName + '/' + vulName + '/' + environmentName)[0]
+  def riskRating(self,riskId,thrName,vulName,environmentName):
+    return self.responseList('call riskRating(:riskId,:thr,:vuln,:env)',{'riskId':riskId,'thr':thrName,'vuln':vulName,'env':environmentName},'MySQL error rating risk associated with threat/vulnerability/environment ' + thrName + '/' + vulName + '/' + environmentName)[0]
 
 
   def riskScore(self,threatName,vulName,environmentName,riskName = ''):
@@ -1697,8 +1709,8 @@ class MySQLDatabaseProxy:
   def misuseCaseNarrative(self,mcId,environmentId):
     return self.responseList('select misuseCaseNarrative(:mcId,:env)',{'mcId':mcId,'env':environmentId},'MySQL error getting narrative for misusecase id ' + str(mcId) + ' in environment ' + str(environmentId))[0]
 
-  def addMisuseCaseNarrative(self,mcId,narrativeText,environmentName):
-    self.updateDatabase('call addMisuseCaseNarrative(:mcId,:nTxt,:env)',{'mcId':mcId,'nTxt':narrativeText,'env':environmentName},'MySQL error adding misuse case narrative')
+  def addMisuseCaseNarrative(self,mcId,narrativeText,environmentName,session):
+    self.updateDatabase('call addMisuseCaseNarrative(:mcId,:nTxt,:env)',{'mcId':mcId,'nTxt':narrativeText,'env':environmentName},'MySQL error adding misuse case narrative',session)
 
   def taskDependencies(self,tId,environmentId):
     return self.responseList('select taskDependencies(:tId,:eId)',{'tId':tId,'eId':environmentId},'MySQL error getting dependencies for task id ' + str(tId) + ' in environment ' + str(environmentId))[0]
@@ -1919,6 +1931,7 @@ class MySQLDatabaseProxy:
     tailType = parameters.tailType()
     tailAsset = parameters.tailAsset()
     assocRationale = parameters.rationale()
+    self.checkAssetAssociation(envName,headAsset,tailAsset)
     self.updateDatabase('call addClassAssociation(:ass,:env,:hAss,:hType,:hNav,:hMult,:hRole,:tRole,:tMult,:tNav,:tType,:tAss,:rationale)',{'ass':associationId,'env':envName,'hAss':headAsset,'hType':headType,'hNav':headNav,'hMult':headMult,'hRole':headRole,'tRole':tailRole,'tMult':tailMult,'tNav':tailNav,'tType':tailType,'tAss':tailAsset,'rationale':assocRationale},'MySQL error adding class association')
     return associationId
 
@@ -1975,6 +1988,16 @@ class MySQLDatabaseProxy:
 
   def getGoalAssociations(self,constraintId = ''):
     return self.goalAssociations('call goalAssociationNames(:id)',constraintId)
+
+  def getGoalAssociation(self,envName,goalName,subGoalName):
+    rows = self.responseList('call getGoalAssociation(:environment,:goal,:subgoal)',{'environment':envName,'goal':goalName,'subgoal':subGoalName},'MySQL error getting goal association')
+    if (len(rows) == 0):
+      raise DatabaseProxyException('Goal association ' + envName + '/' + goalName + '/' + subGoalName + ' not found')
+    associationId,envName,goalName,goalDimName,aType,subGoalName,subGoalDimName,alternativeId,rationale = rows[0]
+    parameters = GoalAssociationParameters(envName,goalName,goalDimName,aType,subGoalName,subGoalDimName,alternativeId,rationale)
+    association = ObjectFactory.build(associationId,parameters)
+    return association
+    
 
   def goalAssociations(self,procName,constraintId = ''):
     rows = self.responseList(procName,{'id':constraintId},'MySQL error getting goal associations')
@@ -2191,6 +2214,8 @@ class MySQLDatabaseProxy:
     tags = parameters.tags()
     self.updateDatabase('call addDomainProperty(:id,:name,:desc,:type,:orig)',{'id':dpId,'name':dpName,'desc':dpDesc,'type':dpType,'orig':dpOrig},'MySQL error adding domain property')
     self.addTags(dpName,'domainproperty',tags)
+    session = self.conn()
+    session.commit()
     return dpId
 
   def updateDomainProperty(self,parameters):
@@ -2203,6 +2228,8 @@ class MySQLDatabaseProxy:
     tags = parameters.tags()
     self.updateDatabase('call updateDomainProperty(:id,:name,:desc,:type,:orig)',{'id':dpId,'name':dpName,'desc':dpDesc,'type':dpType,'orig':dpOrig},'MySQL error updating domain property')
     self.addTags(dpName,'domainproperty',tags)
+    session = self.conn()
+    session.commit()
     return dpId
 
   def deleteDomainProperty(self,dpId):
@@ -2251,8 +2278,8 @@ class MySQLDatabaseProxy:
   def addObstacle(self,parameters):
     parameters.validate()
     obsId = self.newId()
-    obsName = parameters.name().encode('utf-8')
-    obsOrig = parameters.originator().encode('utf-8')
+    obsName = parameters.name()
+    obsOrig = parameters.originator()
     tags = parameters.tags()
     self.updateDatabase('call addObstacle(:id,:name,:orig)',{'id':obsId,'name':obsName,'orig':obsOrig},'MySQL error adding obstacle')
     self.addTags(obsName,'obstacle',tags)
@@ -2294,10 +2321,10 @@ class MySQLDatabaseProxy:
     self.deleteObject(obsId,'obstacle')
 
   def updateSettings(self, projName, background, goals, scope, definitions, contributors,revisions,richPicture,fontSize = '7.5',fontName = 'Times New Roman'):
-    session = self.updateDatabase('call updateProjectSettings(:proj,:bg,:goals,:scope,:picture,:fontSize,:font)',{'proj':projName,'bg':background.encode('utf-8'),'goals':goals.encode('utf-8'),'scope':scope.encode('utf-8'),'picture':richPicture,'fontSize':fontSize,'font':fontName},'MySQL error updating project settings',None,False)
+    session = self.updateDatabase('call updateProjectSettings(:proj,:bg,:goals,:scope,:picture,:fontSize,:font)',{'proj':projName,'bg':background,'goals':goals,'scope':scope,'picture':richPicture,'fontSize':fontSize,'font':fontName},'MySQL error updating project settings',None,False)
     self.updateDatabase('call deleteDictionary()',{},'MySQL error deleting directory',session,False)
     for entry in definitions:
-      self.updateDatabase('call addDictionaryEntry(:e0,:e1)',{'e0':entry[0],'e1':entry[1].encode('utf-8')},'MySQL error adding dictionary entry',session,False)
+      self.updateDatabase('call addDictionaryEntry(:e0,:e1)',{'e0':entry['name'],'e1':entry['value']},'MySQL error adding dictionary entry',session,False)
     self.updateDatabase('call deleteContributors()',{},'MySQL error deleting contributions',session,False)
     for entry in contributors:
       self.updateDatabase('call addContributorEntry(:e0,:e1,:e2,:e3)',{'e0':entry[0],'e1':entry[1],'e2':entry[2],'e3':entry[3]},'MySQL error adding contribution entry',session,False)
@@ -2315,9 +2342,9 @@ class MySQLDatabaseProxy:
   
   def getDictionary(self):
     rows = self.responseList('call getDictionary()',{},'MySQL error getting dictionary')
-    pDict = {}
+    pDict = []
     for key,value in rows:
-      pDict[key] = value
+      pDict.append({'name' : key, 'value' : value})
     return pDict
 
   def getContributors(self):
@@ -2376,7 +2403,6 @@ class MySQLDatabaseProxy:
       exceptionText = 'Cannot add ' + vtType + 's'
       raise DatabaseProxyException(exceptionText) 
     self.updateDatabase('call addValueType(:id,:name,:desc,:type,:score,:rat)',{'id':valueTypeId,'name':vtName,'desc':vtDesc,'type':vtType,'score':vtScore,'rat':vtRat},'MySQL error adding value type')
-    return valueTypeId
 
   def updateValueType(self,parameters):
     valueTypeId = parameters.id()
@@ -2645,7 +2671,7 @@ class MySQLDatabaseProxy:
 
   def nameCheck(self,objtName,dimName):
     objtCount = self.responseList('call nameExists(:obj,:dim)',{'obj':objtName,'dim':dimName},'MySQL error checking existence of ' + dimName + ' ' + objtName)[0]
-    if (objtCount > 0): raise ARMException(dimName + ' ' + objtName + ' already exists.')
+    if (objtCount > 0): raise ARMException('Object with name ' + objtName + ' already exists.')
   
 
   def nameCheckEnvironment(self,objtName,envName,dimName):
@@ -2741,7 +2767,7 @@ class MySQLDatabaseProxy:
     if (sys.version_info > (3,)):
       self.updateDatabase('call addExternalDocument(:id,:name,:vers,:date,:auth,:desc)',{'id':docId,'name':docName,'vers':docVersion,'date':docDate,'auth':docAuthors,'desc':docDesc},'MySQL error adding external document')
     else:
-      self.updateDatabase('call addExternalDocument(:id,:name,:vers,:date,:auth,:desc)',{'id':docId,'name':docName.encode('utf-8'),'vers':docVersion.encode('utf-8'),'date':docDate.encode('utf-8'),'auth':docAuthors.encode('utf-8'),'desc':docDesc.encode('utf-8')},'MySQL error adding external document')
+      self.updateDatabase('call addExternalDocument(:id,:name,:vers,:date,:auth,:desc)',{'id':docId,'name':docName,'vers':docVersion,'date':docDate,'auth':docAuthors,'desc':docDesc},'MySQL error adding external document')
     return docId
 
 
@@ -2755,7 +2781,7 @@ class MySQLDatabaseProxy:
     if (sys.version_info > (3,)):
       self.updateDatabase('call updateExternalDocument(:id,:name,:vers,:date,:auth,:desc)',{'id':docId,'name':docName,'vers':docVersion,'date':docDate,'auth':docAuthors,'desc':docDesc},'MySQL error updating external document')
     else:
-      self.updateDatabase('call updateExternalDocument(:id,:name,:vers,:date,:auth,:desc)',{'id':docId,'name':docName.encode('utf-8'),'vers':docVersion.encode('utf-8'),'date':docDate.encode('utf-8'),'auth':docAuthors.encode('utf-8'),'desc':docDesc.encode('utf-8')},'MySQL error updating external document')
+      self.updateDatabase('call updateExternalDocument(:id,:name,:vers,:date,:auth,:desc)',{'id':docId,'name':docName,'vers':docVersion,'date':docDate,'auth':docAuthors,'desc':docDesc},'MySQL error updating external document')
 
   def addDocumentReference(self,parameters):
     refId = self.newId()
@@ -2769,7 +2795,7 @@ class MySQLDatabaseProxy:
       refName = self.conn.connection().connection.escape_string(refName.replace("\\u2018", "'").replace("\\u2019", "'").replace("\\u2013", "-"))
       docName = parameters.document().encode('ascii','ignore')
       docName = self.conn.connection().connection.escape_string(docName.replace("\\u2018", "'").replace("\\u2019", "'").replace("\\u2013", "-").replace("\\u2022","*").replace("\xb7","."))
-      self.updateDatabase('call addDocumentReference(:rId,:rName,:dName,:cName,:rExec)',{'rId':refId,'rName':refName.encode('utf-8'),'dName':docName.encode('utf-8'),'cName':cName.encode('utf-8'),'rExec':refExc.encode('utf-8')},'MySQL error adding document reference')
+      self.updateDatabase('call addDocumentReference(:rId,:rName,:dName,:cName,:rExec)',{'rId':refId,'rName':refName,'dName':docName,'cName':cName,'rExec':refExc},'MySQL error adding document reference')
     else:
       self.updateDatabase('call addDocumentReference(:rId,:rName,:dName,:cName,:rExec)',{'rId':refId,'rName':refName,'dName':docName,'cName':cName,'rExec':refExc},'MySQL error adding document reference')
     return refId
@@ -2783,7 +2809,7 @@ class MySQLDatabaseProxy:
     if (sys.version_info > (3,)):
       self.updateDatabase('call updateDocumentReference(:rId,:rName,:dName,:cName,:rExec)',{'rId':refId,'rName':refName,'dName':docName,'cName':cName,'rExec':refExc},'MySQL error updating document reference')
     else:
-      self.updateDatabase('call updateDocumentReference(:rId,:rName,:dName,:cName,:rExec)',{'rId':refId,'rName':refName.encode('utf-8'),'dName':docName.encode('utf-8'),'cName':cName.encode('utf-8'),'rExec':refExc.encode('utf-8')},'MySQL error updating document reference')
+      self.updateDatabase('call updateDocumentReference(:rId,:rName,:dName,:cName,:rExec)',{'rId':refId,'rName':refName,'dName':docName,'cName':cName,'rExec':refExc},'MySQL error updating document reference')
 
   def addPersonaCharacteristic(self,parameters):
     pcId = self.newId()
@@ -2797,7 +2823,7 @@ class MySQLDatabaseProxy:
     if (sys.version_info > (3,)):
       self.updateDatabase('call addPersonaCharacteristic(:pc,:pers,:qual,:bVar,:cDesc)',{'pc':pcId,'pers':personaName,'qual':qualName,'bVar':bVar,'cDesc':cDesc},'MySQL error adding persona characteristic')
     else:
-      self.updateDatabase('call addPersonaCharacteristic(:pc,:pers,:qual,:bVar,:cDesc)',{'pc':pcId,'pers':personaName,'qual':qualName,'bVar':bVar,'cDesc':cDesc.encode('utf-8')},'MySQL error adding persona characteristic')
+      self.updateDatabase('call addPersonaCharacteristic(:pc,:pers,:qual,:bVar,:cDesc)',{'pc':pcId,'pers':personaName,'qual':qualName,'bVar':bVar,'cDesc':cDesc},'MySQL error adding persona characteristic')
     self.addPersonaCharacteristicReferences(pcId,grounds,warrant,rebuttal)
     return pcId
 
@@ -2814,7 +2840,7 @@ class MySQLDatabaseProxy:
     if (sys.version_info > (3,)):
       self.updateDatabase('call updatePersonaCharacteristic(:pc,:pers,:qual,:bVar,:cDesc)',{'pc':pcId,'pers':personaName,'qual':qualName,'bVar':bVar,'cDesc':cDesc},'MySQL error updating persona characteristic',session)
     else:
-      self.updateDatabase('call updatePersonaCharacteristic(:pc,:pers,:qual,:bVar,:cDesc)',{'pc':pcId,'pers':personaName,'qual':qualName,'bVar':bVar,'cDesc':cDesc.encode('utf-8')},'MySQL error updating persona characteristic',session)
+      self.updateDatabase('call updatePersonaCharacteristic(:pc,:pers,:qual,:bVar,:cDesc)',{'pc':pcId,'pers':personaName,'qual':qualName,'bVar':bVar,'cDesc':cDesc},'MySQL error updating persona characteristic',session)
     self.addPersonaCharacteristicReferences(pcId,grounds,warrant,rebuttal)
 
   def getConceptReferences(self,constraintId = -1):
@@ -2832,7 +2858,7 @@ class MySQLDatabaseProxy:
     dimName = parameters.dimension()
     objtName = parameters.objectName()
     cDesc = parameters.description()
-    self.updateDatabase('call addConceptReference(:rId,:rName,:dName,:obj,:cDesc)',{'rId':refId,'rName':refName,'dName':dimName,'obj':objtName,'cDesc':cDesc.encode('utf-8')},'MySQL error adding concept reference')
+    self.updateDatabase('call addConceptReference(:rId,:rName,:dName,:obj,:cDesc)',{'rId':refId,'rName':refName,'dName':dimName,'obj':objtName,'cDesc':cDesc},'MySQL error adding concept reference')
     return refId
 
   def updateConceptReference(self,parameters):
@@ -2841,7 +2867,7 @@ class MySQLDatabaseProxy:
     dimName = parameters.dimension()
     objtName = parameters.objectName()
     cDesc = parameters.description()
-    self.updateDatabase('call updateConceptReference(:rId,:rName,:dName,:obj,:cDesc)',{'rId':refId,'rName':refName,'dName':dimName,'obj':objtName,'cDesc':cDesc.encode('utf-8')},'MySQL error updating concept reference')
+    self.updateDatabase('call updateConceptReference(:rId,:rName,:dName,:obj,:cDesc)',{'rId':refId,'rName':refName,'dName':dimName,'obj':objtName,'cDesc':cDesc},'MySQL error updating concept reference')
     return refId
 
   def deleteConceptReference(self,refId,dimName):
@@ -2859,7 +2885,7 @@ class MySQLDatabaseProxy:
 
 
   def addPersonaCharacteristicReference(self,pcId,refName,crTypeName,refDesc,dimName):
-    self.updateDatabase('call addPersonaCharacteristicReference(:pc,:ref,:cr,:refD,:dim)',{'pc':pcId,'ref':refName,'cr':crTypeName,'refD':refDesc.encode('utf-8'),'dim':dimName},'MySQL error adding persona characteristic reference')
+    self.updateDatabase('call addPersonaCharacteristicReference(:pc,:ref,:cr,:refD,:dim)',{'pc':pcId,'ref':refName,'cr':crTypeName,'refD':refDesc,'dim':dimName},'MySQL error adding persona characteristic reference')
 
   def referenceDescription(self,dimName,refName): return self.responseList('call referenceDescription(:dim,:ref)',{'dim':dimName,'ref':refName},'MySQL error getting reference description')[0]
   
@@ -2917,7 +2943,7 @@ class MySQLDatabaseProxy:
 
   def addDirectoryEntry(self,dLabel,dName,dDesc,dTypeId,dRef,dimName):
     dimName = dimName[0].upper() + dimName[1:]
-    self.updateDatabase('call add' + dimName + 'DirectoryEntry(:lbl,:name,:desc,:type,:ref)',{'lbl':dLabel,'name':dName,'desc':dDesc.encode('utf-8'),'type':dTypeId,'ref':dRef},'MySQL error adding directory entry')
+    self.updateDatabase('call add' + dimName + 'DirectoryEntry(:lbl,:name,:desc,:type,:ref)',{'lbl':dLabel,'name':dName,'desc':dDesc,'type':dTypeId,'ref':dRef},'MySQL error adding directory entry')
 
   def lastRequirementLabel(self,assetName): return self.responseList('select lastRequirementLabel(:ass)',{'ass':assetName},'MySQL error getting last requirement label')[0]
 
@@ -3004,7 +3030,7 @@ class MySQLDatabaseProxy:
   def addUseCaseStep(self,ucId,envName,stepNo,step):
     step.validate()
     self.updateDatabase('call addUseCaseStep(:id,:env,:step,:text,:synopsis,:actor,:type)',{'id':ucId,'env':envName,'step':stepNo,'text':step.text(),'synopsis':step.synopsis(),'actor':step.actor(),'type':step.actorType()},'MySQL error adding use case step') 
-    for tag in step.tags(): self.addUseCaseStepTag(ucId,envName,stepNo,tag)
+    for tag in set(step.tags()): self.addUseCaseStepTag(ucId,envName,stepNo,tag)
     for idx,exc in list((step.theExceptions).items()):
       self.addUseCaseStepException(ucId,envName,stepNo,exc[0],exc[1],exc[2],exc[3],exc[4])
 
@@ -3054,11 +3080,20 @@ class MySQLDatabaseProxy:
   def riskAnalysisToXml(self,includeHeader=True):
     return self.responseList('call riskAnalysisToXml(:head)',{'head':includeHeader},'MySQL error exporting risk analysis artifacts to XML')[0]
 
+  def riskAnalysisToJSON(self):
+    return self.responseList('call riskAnalysisToJSON()',{},'MySQL error exporting risk analysis artifacts to JSON')[0]
+
   def goalsToXml(self,includeHeader=True):
     return self.responseList('call goalsToXml(:head)',{'head':includeHeader},'MySQL error exporting goals to XML')[0]
 
+  def goalsToJSON(self):
+    return self.responseList('call goalsToJSON()',{},'MySQL error exporting goals to JSON')[0]
+
   def usabilityToXml(self,includeHeader=True):
     return self.responseList('call usabilityToXml(:head)',{'head':includeHeader},'MySQL error exporting usability data to XML')[0]
+
+  def usabilityToJSON(self):
+    return self.responseList('call usabilityToJSON()',{},'MySQL error exporting usability data to JSON')[0]
 
   def misusabilityToXml(self,includeHeader=True):
     return self.responseList('call misusabilityToXml(:head)',{'head':includeHeader},'MySQL error exporting misusability data to XML')[0]
@@ -3074,6 +3109,9 @@ class MySQLDatabaseProxy:
 
   def projectToXml(self,includeHeader=True):
     return self.responseList('call projectToXml(:head)',{'head':includeHeader},'MySQL error exporting project data to XML')[0]
+
+  def projectToJSON(self):
+    return self.responseList('call projectToJSON()',{},'MySQL error exporting project data to JSON')[0]
 
   def architecturalPatternToXml(self,apName):
     return self.responseList('call architecturalPatternToXml(:name)',{'name':apName},'MySQL error exporting architectural pattern to XML')[0]
@@ -3102,11 +3140,11 @@ class MySQLDatabaseProxy:
 
   def addTaskCharacteristicReferences(self,tcId,grounds,warrant,rebuttal):
     for g,desc,dim in grounds:
-      self.addTaskCharacteristicReference(tcId,g,'grounds',desc.encode('utf-8'),dim)
+      self.addTaskCharacteristicReference(tcId,g,'grounds',desc,dim)
 
-    for w,desc,dim in warrant:  self.addTaskCharacteristicReference(tcId,w,'warrant',desc.encode('utf-8'),dim)
+    for w,desc,dim in warrant:  self.addTaskCharacteristicReference(tcId,w,'warrant',desc,dim)
 
-    for r, desc, dim in rebuttal:  self.addTaskCharacteristicReference(tcId,r,'rebuttal',desc.encode('utf-8'),dim)
+    for r, desc, dim in rebuttal:  self.addTaskCharacteristicReference(tcId,r,'rebuttal',desc,dim)
 
 
   def addTaskCharacteristicReference(self,tcId,refName,crTypeName,refDesc,dimName):
@@ -3355,8 +3393,14 @@ class MySQLDatabaseProxy:
   def tvTypesToXml(self,includeHeader=True):
     return self.responseList('call tvTypesToXml(:head)',{'head':includeHeader},'MySQL error exporting threat and vulnerability types to XML')[0]
 
+  def tvTypesToJSON(self):
+    return self.responseList('call tvTypesToJSON()',{},'MySQL error exporting threat and vulnerability types to JSON')[0]
+
   def domainValuesToXml(self,includeHeader=True):
     return self.responseList('call domainValuesToXml(:head)',{'head':includeHeader},'MySQL error exporting domain values to XML')[0]
+
+  def domainValuesToJSON(self,includeHeader=True):
+    return self.responseList('call domainValuesToJSON()',{},'MySQL error exporting domain values to JSON')[0]
 
   def locationsToXml(self):
     return self.responseList('call locationsToXml()',{},'MySQL error exporting locations to XML')[0]
@@ -3387,12 +3431,9 @@ class MySQLDatabaseProxy:
     if (session_id != None):
       db_proxy.reconnect(False, session_id)
 
-  def conceptMapModel(self,envName,reqName = ''):
-    callTxt = 'call parameterisedConceptMapModel(:env,:req)'
+  def conceptMapModel(self,envName,reqName = 'all'):
+    callTxt = 'call conceptMapModel_all(:env,:req)'
     argDict = {'env':envName,'req':reqName}
-    if reqName == '':
-      callTxt = 'call conceptMapModel(:env)'
-      argDict = {'env':envName}
     rows = self.responseList(callTxt,argDict,'MySQL error getting concept map model')
     associations = {}
 
@@ -3444,14 +3485,13 @@ class MySQLDatabaseProxy:
   def addTags(self,dimObjt,dimName,tags):
     self.deleteTags(dimObjt,dimName)
     curs = self.conn.connection().connection.cursor()
-    for tag in tags:
+    for tag in set(tags):
       try:
         curs.execute('call addTag(%s,%s,%s)',[dimObjt,tag,dimName])
       except OperationalError as e:
         raise DatabaseProxyException('MySQL error adding tag (message: ' + format(e))
       except _mysql_exceptions.DatabaseError as e:
-        id,msg = e
-        raise DatabaseProxyException('MySQL error adding tag (id:' + str(id) + ', message: ' + msg)
+        raise DatabaseProxyException('MySQL error adding ' + dimName + ' ' + dimObjt + ' tag ' + tag + ': ' + format(e))
     curs.close()
 
   def getTags(self,dimObjt,dimName):
@@ -3858,7 +3898,7 @@ class MySQLDatabaseProxy:
     docContent = parameters.content()
     docCodes = parameters.codes()
     docMemos = parameters.memos()
-    self.updateDatabase('call addInternalDocument(:id,:name,:desc,:cont)',{'id':docId,'name':docName.encode('utf-8'),'desc':docDesc.encode('utf-8'),'cont':docContent.encode('utf-8')},'MySQL error adding internal document')
+    self.updateDatabase('call addInternalDocument(:id,:name,:desc,:cont)',{'id':docId,'name':docName,'desc':docDesc,'cont':docContent},'MySQL error adding internal document')
     self.addDocumentCodes(docName,docCodes)
     self.addDocumentMemos(docName,docMemos)
     return docId
@@ -3871,7 +3911,7 @@ class MySQLDatabaseProxy:
     docCodes = parameters.codes()
     docMemos = parameters.memos()
     session = self.updateDatabase('call deleteInternalDocumentComponents(:id)',{'id':docId},'MySQL error deleting internal document components',None,False)
-    self.updateDatabase('call updateInternalDocument(:id,:name,:desc,:cont)',{'id':docId,'name':docName.encode('utf-8'),'desc':docDesc.encode('utf-8'),'cont':docContent.encode('utf-8')},'MySQL error updating internal document',session)
+    self.updateDatabase('call updateInternalDocument(:id,:name,:desc,:cont)',{'id':docId,'name':docName,'desc':docDesc,'cont':docContent},'MySQL error updating internal document',session)
     self.addDocumentCodes(docName,docCodes)
     self.addDocumentMemos(docName,docMemos)
 
@@ -3895,7 +3935,7 @@ class MySQLDatabaseProxy:
     codeDesc = parameters.description()
     incCriteria = parameters.inclusionCriteria()
     codeEg  = parameters.example()
-    self.updateDatabase('call addCode(:id,:name,:type,:desc,:crit,:eg)',{'id':codeId,'name':codeName.encode('utf-8'),'type':codeType,'desc':codeDesc.encode('utf-8'),'crit':incCriteria.encode('utf-8'),'eg':codeEg.encode('utf-8')},'MySQL error adding code')
+    self.updateDatabase('call addCode(:id,:name,:type,:desc,:crit,:eg)',{'id':codeId,'name':codeName,'type':codeType,'desc':codeDesc,'crit':incCriteria,'eg':codeEg},'MySQL error adding code')
     return codeId
 
 
@@ -3906,7 +3946,7 @@ class MySQLDatabaseProxy:
     codeDesc = parameters.description()
     incCriteria = parameters.inclusionCriteria()
     codeEg  = parameters.example()
-    self.updateDatabase('call updateCode(:id,:name,:type,:desc,:crit,:eg)',{'id':codeId,'name':codeName.encode('utf-8'),'type':codeType,'desc':codeDesc.encode('utf-8'),'crit':incCriteria.encode('utf-8'),'eg':codeEg.encode('utf-8')},'MySQL error updating code')
+    self.updateDatabase('call updateCode(:id,:name,:type,:desc,:crit,:eg)',{'id':codeId,'name':codeName,'type':codeType,'desc':codeDesc,'crit':incCriteria,'eg':codeEg},'MySQL error updating code')
 
   def documentCodes(self,docName):
     rows = self.responseList('call documentCodes(:name)',{'name':docName},'MySQL error getting document code')
@@ -4016,7 +4056,7 @@ class MySQLDatabaseProxy:
     cNet = parameters.network()
     ipSpec = parameters.specification()
     chs = parameters.channels()
-    self.updateDatabase('call addImpliedProcess(:id,:name,:desc,:proc,:spec)',{'id':ipId,'name':ipName,'desc':ipDesc.encode('utf-8'),'proc':pName,'spec':ipSpec.encode('utf-8')},'MySQL error adding implied process')
+    self.updateDatabase('call addImpliedProcess(:id,:name,:desc,:proc,:spec)',{'id':ipId,'name':ipName,'desc':ipDesc,'proc':pName,'spec':ipSpec},'MySQL error adding implied process')
     self.addImpliedProcessNetwork(ipId,pName,cNet)
     self.addImpliedProcessChannels(ipId,chs)
     return ipId
@@ -4206,14 +4246,14 @@ class MySQLDatabaseProxy:
     memoId = self.newId()
     memoName = parameters.name()
     memoDesc = parameters.description()
-    self.updateDatabase('call addMemo(:id,:name,:desc)',{'id':memoId,'name':memoName.encode('utf-8'),'desc':memoDesc.encode('utf-8')},'MySQL error adding memo')
+    self.updateDatabase('call addMemo(:id,:name,:desc)',{'id':memoId,'name':memoName,'desc':memoDesc},'MySQL error adding memo')
     return memoId
 
   def updateMemo(self,parameters):
     memoId = parameters.id()
     memoName = parameters.name()
     memoDesc = parameters.description()
-    self.updateDatabase('call updateMemo(:id,:name,:desc)',{'id':memoId,'name':memoName.encode('utf-8'),'desc':memoDesc.encode('utf-8')},'MySQL error updating memo')
+    self.updateDatabase('call updateMemo(:id,:name,:desc)',{'id':memoId,'name':memoName,'desc':memoDesc},'MySQL error updating memo')
 
   def documentMemos(self,docName):
     rows = self.responseList('call documentMemos(:doc)',{'doc':docName},'MySQL error getting document memo')
@@ -4461,24 +4501,25 @@ class MySQLDatabaseProxy:
     b.settings[session_id]['dbName'] = dbName
     self.clearDatabase(session_id)
     self.reconnect(True,session_id)
+    rootDir = b.cairisRoot
+    createDefaults(rootDir,dbHost,dbPort,dbUser,dbPasswd,dbName)
 
   def openDatabase(self,dbName,session_id):
     b = Borg()
-    dbUser = b.settings[session_id]['dbUser']
-    b.settings[session_id]['dbName'] = dbUser + '_' + dbName
+    b.settings[session_id]['dbName'] = dbName
     self.reconnect(True,session_id)
+
 
   def showDatabases(self,session_id):
     b = Borg()
     ses_settings = b.get_settings(session_id)
     dbUser = ses_settings['dbUser']
     dbName = ses_settings['dbName']
-    rows = self.responseList('show databases',{},'MySQL error showing databases')
-    restrictedDbs = ['information_schema','flaskdb','mysql','performance_schema',dbName]
+    rows = databases(dbUser)
     dbs = []
-    for dbn in rows:
-      if (dbn not in restrictedDbs):
-        dbs.append(dbn.split(dbUser + '_')[1])
+    for dbn,owner in rows:
+      if (dbn != dbName):
+        dbs.append((dbn.split(owner + '_')[1],owner))
     return dbs
 
   def checkPermissions(self,reqDbName,session_id):
@@ -4488,14 +4529,15 @@ class MySQLDatabaseProxy:
     currentDbName = ses_settings['dbName']
     defaultDbName = dbUser + '_default'
     reqDbName = dbUser + '_' + reqDbName
-    restrictedDbs = ['information_schema','flaskdb','mysql','performance_schema',currentDbName,defaultDbName]
-    rows = self.responseList('show databases',{},'MySQL error showing databases')
+    restrictedDbs = [currentDbName,defaultDbName]
+    rows = databases(dbUser)
     dbs = []
-    for dbName in rows:
+    for dbName, owner in rows:
       if (dbName not in restrictedDbs):
         if (reqDbName == dbName):
           return True
     return False
+
 
   def deleteDatabase(self,dbName,session_id):
     b = Borg()
@@ -4508,14 +4550,17 @@ class MySQLDatabaseProxy:
       exceptionText = 'You cannot remove this database.'
       raise DatabaseProxyException(exceptionText) 
 
-    dbUser = ses_settings['dbUser']
-    dbName = dbUser + '_' + dbName
+    dbUser = canonicalDbUser(ses_settings['dbUser'])
+    dbName = canonicalDbName(dbUser + '_' + dbName)
     try:
       dbEngine = create_engine('mysql+mysqldb://root'+':'+rPasswd+'@'+dbHost+':'+str(dbPort))
       tmpConn = scoped_session(sessionmaker(bind=dbEngine))
-      stmt = 'drop database if exists `' + dbName + '`'
+      stmts = ['drop database if exists `' + dbName + '`',
+              'delete from cairis_owner.db_owner where db = "' + dbName + '" and owner = "' + dbUser + '"',
+              'delete from mysql.db where Db = "' + dbName + '"']
       session = tmpConn()
-      session.execute(stmt)
+      for stmt in stmts:
+        session.execute(stmt)
       session.close()
       tmpConn.remove()
     except OperationalError as e:
@@ -4548,12 +4593,12 @@ class MySQLDatabaseProxy:
 
   def getDataFlows(self,dfName='',envName=''):
     dfRows = self.responseList('call getDataFlows(:df,:env)',{'df':dfName,'env':envName},'MySQL error getting data flows')
-    dataFlows = {}
+    dataFlows = []
     for dfName,envName,fromName,fromType,toName,toType in dfRows:
       dfAssets = self.getDataFlowAssets(dfName,envName)
       parameters = DataFlowParameters(dfName,envName,fromName,fromType,toName,toType,dfAssets)
       df = ObjectFactory.build(-1,parameters)
-      dataFlows[dfName + '/' + envName] = df
+      dataFlows.append(df)
     return dataFlows
 
   def getDataFlowAssets(self,dfName,envName):
@@ -4569,10 +4614,10 @@ class MySQLDatabaseProxy:
     dfAssets = parameters.assets()
     self.updateDatabase('call addDataFlow(:df,:env,:fName,:fType,:tName,:tType)',{'df':dfName,'env':envName,'fName':fromName,'fType':fromType,'tName':toName,'tType':toType},'MySQL error adding data flow')
     for dfAsset in dfAssets:
-      self.addDataFlowAsset(dfName,envName,dfAsset)
+      self.addDataFlowAsset(dfName,envName,fromType,fromName,toType,toName,dfAsset)
 
-  def addDataFlowAsset(self,dfName,envName,dfAsset):
-    self.updateDatabase('call addDataFlowAsset(:df,:env,:ass)',{'df':dfName,'env':envName,'ass':dfAsset},'MySQL error adding data flow asset')
+  def addDataFlowAsset(self,dfName,envName,fromType,fromName,toType,toName,dfAsset):
+    self.updateDatabase('call addDataFlowAsset(:df,:env,:fromType,:fromName,:toType,:toName,:ass)',{'df':dfName,'env':envName,'fromType':fromType,'fromName':fromName,'toType':toType,'toName':toName,'ass':dfAsset},'MySQL error adding data flow asset')
 
   def updateDataFlow(self,oldDfName,oldEnvName,parameters):
     dfName = parameters.name()
@@ -4585,7 +4630,7 @@ class MySQLDatabaseProxy:
     session = self.updateDatabase('call deleteDataFlowAssets(:df,:env)',{'df':oldDfName,'env':oldEnvName},'MySQL error deleting data flow assets',None,False)
     self.updateDatabase('call updateDataFlow(:oDf,:nDf,:oEnv,:nEnv,:fName,:fType,:tName,:tType)',{'oDf':oldDfName,'nDf':dfName,'oEnv':oldEnvName,'nEnv':envName,'fName':fromName,'fType':fromType,'tName':toName,'tType':toType},'MySQL error updating data flow',session)
     for dfAsset in dfAssets:
-      self.addDataFlowAsset(dfName,envName,dfAsset)
+      self.addDataFlowAsset(dfName,envName,fromType,fromName,toType,toName,dfAsset)
 
   def deleteDataFlow(self,dfName,envName):
     self.updateDatabase('call deleteDataFlow(:df,:env)',{'df':dfName,'env':envName},'MySQL Error deleting data flow')
@@ -4600,14 +4645,14 @@ class MySQLDatabaseProxy:
 
   def getTrustBoundaries(self,constraintId = -1):
     tbRows = self.responseList('call getTrustBoundaries(:id)',{'id':constraintId},'MySQL error getting trust boundaries')
-    tbs = {} 
+    tbs = [] 
     for tbId,tbName,tbDesc in tbRows:
       components = {}
       privileges = {}
       for environmentId,environmentName in self.dimensionEnvironments(tbId,'trust_boundary'):
         components[environmentName] = self.trustBoundaryComponents(tbId,environmentId)
         privileges[environmentName] = self.trustBoundaryPrivilege(tbId,environmentId)
-      tbs[tbName] = TrustBoundary(tbId,tbName,tbDesc,components,privileges)
+      tbs.append(TrustBoundary(tbId,tbName,tbDesc,components,privileges))
     return tbs
 
   def trustBoundaryComponents(self,tbId, envId):
@@ -4691,3 +4736,88 @@ class MySQLDatabaseProxy:
 
   def reassociateRequirement(self,reqName,domName):
     self.updateDatabase('call reassociateRequirement(:reqName,:domName)',{'reqName':reqName,'domName':domName},'MySQL error associating requirement ' + reqName + ' with domain ' + domName)
+
+  def getDependency(self,envName,dependerName,dependeeName,dependencyName):
+    deps = self.responseList('call getDependency(:env,:dep,:dee,:dpy)',{'env':envName,'dep':dependerName,'dee':dependeeName,'dpy':dependencyName},'MySQL error getting dependency')
+    if (len(deps) == 0):
+      raise ObjectNotFound(envName + ' / ' + dependerName + ' / ' + dependeeName + ' / ' + dependencyName)
+    parameters = DependencyParameters(deps[0][1],deps[0][2],deps[0][3],deps[0][4],deps[0][5],deps[0][6])
+    return ObjectFactory.build(deps[0][0],parameters)
+
+  def assetAttackSurface(self,assetName,envName):
+    return self.responseList('select assetAttackSurface(:asset,:environment)',{'asset':assetName,'environment':envName},'MySQL error getting asset attack surface')[0]
+
+  def setImage(self,imageName,imageContent,mimeType):
+    self.updateDatabase('call setImage(:name,:content,:type)',{'name':imageName,'content': b64encode(imageContent),'type':mimeType},'MySQL error setting image')
+
+  def getImage(self,imageName):
+    imgResponse = self.responseList('call getImage(:name)',{'name': imageName},'MySQL error getting image')
+    if (len(imgResponse) == 0):
+      return None
+    else:
+      return imgResponse[0]
+
+  def getImages(self):
+    return self.responseList('call getImages()',{},'MySQL error getting images')
+
+  def checkDataFlowExists(self,dfName,fromType,fromName,toType,toName,envName):
+    objtCount = self.responseList('call checkDataFlowExists(:dfName,:fromType,:fromName,:toType,:toName,:env)',{'dfName':dfName,'fromType':fromType,'fromName':fromName,'toType':toType,'toName':toName,'env':envName},'MySQL error checking dataflow in environment')[0]
+    if (objtCount > 0): raise ARMException(dfName + ' between ' + fromType + ' ' + fromName + ' and ' + toType + ' ' + toName + ' in environment ' + envName + ' already exists.')
+
+  def riskModelTags(self, envName):
+    rows = self.responseList('call riskModelTags(:env)',{'env':envName},'MySQL error getting risk model tags')
+    tagDict = {}
+    for row in rows:
+      tag = row[0]
+      objt = row[1]
+      if (tag not in tagDict):
+        tagDict[tag] = [objt]
+      else:
+        tagDict[tag].append(objt)
+    return tagDict
+
+  def securityPatternAssetModel(self,spName):
+    rows = self.responseList('call securityPatternClassModel(:sp)',{'sp':spName},'MySQL error getting security pattern asset model')
+    associations = {}
+    for headName,headType,headMult,headRole,tailRole,tailMult,tailType,tailName in rows:
+      associationId = -1
+      envName = ''
+      headNav = 0
+      tailNav = 0
+      rationale = ''
+      headDim  = 'template_asset'
+      tailDim  = 'template_asset'
+      parameters = ClassAssociationParameters(envName,headName,headDim,headNav,headType,headMult,headRole,tailRole,tailMult,tailType,tailNav,tailDim,tailName,rationale)
+      association = ObjectFactory.build(associationId,parameters)
+      asLabel = spName + '/' + headName + '/' + tailName
+      associations[asLabel] = association
+    return associations
+
+  def dimensionRequirements(self,dimName,objtName): return self.responseList('call ' + dimName + 'RequirementNames(:objt)',{'objt':objtName},'MySQL error getting requirements associated with ' + dimName + ' ' + objtName)
+
+  def exceptionRootObstacles(self,ucId): return self.responseList('call hasRootObstacles(:id)',{'id':ucId},'MySQL error getting root obstacles resulting from exceptions for use case ')[0]
+
+  def addSecurityPatterns(self,vts,taps,spps):
+    self.deleteSecurityPattern(-1)
+    for vt in vts:
+      self.addValueType(vt)
+    for tap in taps:
+      if (self.nameExists(tap.name(),'template_asset')):
+        tap.setId(self.getDimensionId(tap.name(),'template_asset'))
+        self.updateTemplateAsset(tap)
+      else: 
+        self.addTemplateAsset(tap)
+    for sp in spps:
+      self.addSecurityPattern(sp)
+
+  def securityPatternsToXml(self):
+    return self.responseList('call patternsToXml()',{},'MySQL error exporting security patterns to XML')[0]
+
+  def checkAssetAssociation(self,envName,headName,tailName):
+    if (self.responseList('select isClassAssociationPresent(:env,:head,:tail)',{'env':envName,'head':headName,'tail':tailName},'MySQL error checking asset association')[0]):
+      raise DatabaseProxyException('Association between head asset ' + headName + ' and tail asset ' + tailName + ' already exists in environment ' + envName)
+    
+  def checkTrace(self,fromObjt,fromName,toObjt,toName):
+    if (self.responseList('call isTracePresent(:fromObjt,:fromName,:toObjt,:toName)',{'fromObjt':fromObjt,'fromName':fromName,'toObjt':toObjt,'toName':toName},'MySQL error checking trace')[0]):
+      raise DatabaseProxyException('Trace from ' + fromObjt + ' ' + fromName + ' to ' + toObjt + ' ' + toName + ' already exists')
+    

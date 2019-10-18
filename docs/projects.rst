@@ -1,7 +1,7 @@
 Creating a new project
 ======================
 
-The first stage of the design process involves establishing the scope of
+The first stage of any design process involves establishing the scope of
 subsequent analysis. CAIRIS supports this exercise by using the Properties form.
 
 .. figure:: projectSettings.jpg
@@ -19,7 +19,7 @@ subsequent analysis. CAIRIS supports this exercise by using the Properties form.
    specified.
 
 -  If a rich picture or context diagram has been agreed, click on the
-   Rich Picture tab, and click on the image (or avatar if not not rich picture has been defined) to
+   Rich Picture tab, and click on the image (or avatar if no rich picture has been defined) to
    import.
 
 -  Names or terms that the readership of the specification may be

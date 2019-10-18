@@ -19,7 +19,7 @@ from cairis.core.ARM import *
 from cairis.core.Goal import Goal
 from cairis.core.GoalEnvironmentProperties import GoalEnvironmentProperties
 from cairis.core.GoalParameters import GoalParameters
-from cairis.daemon.CairisHTTPError import ObjectNotFoundHTTPError, MalformedJSONHTTPError, ARMHTTPError, MissingParameterHTTPError, OverwriteNotAllowedHTTPError
+from cairis.daemon.CairisHTTPError import CairisHTTPError, ObjectNotFoundHTTPError, MalformedJSONHTTPError, ARMHTTPError, MissingParameterHTTPError, OverwriteNotAllowedHTTPError
 from cairis.misc.KaosModel import KaosModel
 from cairis.core.ValueType import ValueType
 from cairis.core.ValueTypeParameters import ValueTypeParameters
@@ -27,6 +27,7 @@ from cairis.data.CairisDAO import CairisDAO
 from cairis.tools.JsonConverter import json_serialize, json_deserialize
 from cairis.tools.ModelDefinitions import GoalEnvironmentPropertiesModel, GoalModel, ConcernAssociationModel, RefinementModel
 from cairis.tools.SessionValidator import check_required_keys, get_fonts
+import http
 
 __author__ = 'Robin Quetin, Shamal Faily'
 
@@ -94,7 +95,7 @@ class GoalDAO(CairisDAO):
         self.db_proxy.addGoal(goalParams)
       else:
         self.close()
-        raise OverwriteNotAllowedHTTPError('The provided goal name')
+        raise CairisHTTPError(status_code=http.client.BAD_REQUEST,status="Object exists",message="An object with the name " + goal.theName + " already exists.")
     except DatabaseProxyException as ex:
       self.close()
       raise ARMHTTPError(ex)
@@ -141,15 +142,17 @@ class GoalDAO(CairisDAO):
       self.close()
       raise ARMHTTPError(ex)
 
-  def get_goal_model(self, environment_name,goal_name,usecase_name):
+  def get_goal_model(self, environment_name,goal_name,usecase_name,is_top_level):
     fontName, fontSize, apFontName = get_fonts(session_id=self.session_id)
     try:
       associationDictionary = {}
       goalFilter = 0
       ucFilter = 0
       if goal_name != '': goalFilter = 1
-      if usecase_name != '': ucFilter = 1
-      associationDictionary = self.db_proxy.goalModel(environment_name,goal_name,0,ucFilter)
+      if usecase_name != '': 
+        ucFilter = 1
+        goal_name = usecase_name
+      associationDictionary = self.db_proxy.goalModel(environment_name,goal_name,is_top_level,ucFilter)
       associations = KaosModel(list(associationDictionary.values()), environment_name, 'goal',goal_name,db_proxy=self.db_proxy, font_name=fontName,font_size=fontSize)
       dot_code = associations.graph()
       return dot_code

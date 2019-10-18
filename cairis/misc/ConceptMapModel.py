@@ -24,10 +24,15 @@ from cairis.core.ARM import *
 __author__ = 'Shamal Faily'
 
 class ConceptMapModel:
-  def __init__(self,associations,envName,conceptName = '',cfSet = False,db_proxy=None, font_name=None,font_size=None):
+  def __init__(self,associations,envName = 'all',conceptName = 'all', isAsset = False, cfSet = False,db_proxy=None, font_name=None,font_size=None):
     self.theAssociations = associations
     self.theEnvironmentName = envName
     self.theConceptName = conceptName
+    if (isAsset == True):
+      self.theRequirementsDimension = 'asset'
+    else:
+      self.theRequirementsDimension = 'environment'
+    self.isAsset = isAsset
     self.dbProxy = db_proxy
     self.fontName = font_name
     self.fontSize = font_size
@@ -75,12 +80,20 @@ class ConceptMapModel:
     self.conceptNameSet = set([])
     self.assocSet = set([])
 
- 
-    if self.theConceptName == '':
-      reqNodes = self.dbProxy.getDimensionNames('requirement',self.theEnvironmentName)
+    if ((self.theEnvironmentName == 'all') and (self.theConceptName == 'all')):
+      reqNodes = self.dbProxy.getDimensionNames('requirement','')
       for nodeName in reqNodes:
         self.buildNode(nodeName)
         self.conceptNameSet.add(nodeName)
+    elif self.theConceptName == 'all':
+      reqNodes = self.dbProxy.dimensionRequirements(self.theRequirementsDimension,self.theEnvironmentName)
+      for nodeName in reqNodes:
+        self.buildNode(nodeName)
+        self.conceptNameSet.add(nodeName)
+    else:
+      self.buildNode(self.theConceptName)
+      self.conceptNameSet.add(self.theConceptName)
+
     
     for association in self.theAssociations:
       fromName = association.fromName()

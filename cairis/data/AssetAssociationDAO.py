@@ -53,14 +53,15 @@ class AssetAssociationDAO(CairisDAO):
       self.close()
       raise ARMHTTPError(ex)
 
+    assocs = []
     for key in cas:
       ca = cas[key]
       del ca.theId
       del ca.theHeadDim
       del ca.theTailDim
-      cas[key] = ca
+      assocs.append(ca)
 
-    return cas
+    return assocs
 
   def add_asset_association(self, assoc):
     assocParams = ClassAssociationParameters(
@@ -102,6 +103,8 @@ class AssetAssociationDAO(CairisDAO):
       tailName=assoc.theTailAsset,
       rationale=assoc.theRationale)
     try:
+      if ((assoc.theEnvironmentName != oldEnvName) or (assoc.theHeadAsset != oldHeadAsset) or (assoc.theTailAsset != oldTailAsset)):
+        self.db_proxy.checkAssetAssociation(assoc.theEnvironmentName,assoc.theHeadAsset,assoc.theTailAsset)
       caId = self.db_proxy.getDimensionId(oldEnvName + '/' + oldHeadAsset + '/' + oldTailAsset,'classassociation')
       assocParams.setId(caId)
       self.db_proxy.updateClassAssociation(assocParams)

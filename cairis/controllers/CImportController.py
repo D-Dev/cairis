@@ -42,6 +42,37 @@ import codecs
 
 __author__ = 'Robin Quetin, Shamal Faily'
 
+class CImportPackageAPI(Resource):
+  def post(self):
+    session_id = get_session_id(session, request)
+
+    content_length = request.content_length
+    max_length = 30*1024*1024
+    if content_length > max_length:
+      raise MissingParameterHTTPError(exception=RuntimeError('File exceeded maximum size (30MB)'))
+
+    try:
+      package = request.files['file']
+    except LookupError as ex:
+      raise MissingParameterHTTPError(param_names=['file'])
+    except Exception as ex:
+      raise CairisHTTPError(status_code=CONFLICT, message=str(ex), status='Unknown error')
+
+    try:
+      dao = ImportDAO(session_id)
+      dao.package_import(package.stream.read())
+      dao.close()
+    except DatabaseProxyException as ex:
+      raise ARMHTTPError(ex)
+    except ARMException as ex:
+      raise ARMHTTPError(ex)
+    except Exception as ex:
+      raise CairisHTTPError(status_code=500,message=str(ex),status='Unknown error')
+
+    resp_dict = {'message': package.filename + ' imported'}
+    resp = make_response(json_serialize(resp_dict, session_id=session_id), OK)
+    resp.contenttype = 'application/json'
+    return resp
 
 class CImportTextAPI(Resource):
 
@@ -74,12 +105,13 @@ class CImportTextAPI(Resource):
         raise ARMHTTPError(ex)
       except ARMException as ex:
         raise ARMHTTPError(ex)
-      except Exception as ex:
-        raise CairisHTTPError(status_code=500,message=str(ex.message),status='Unknown error')
 
       remove_file(abs_path)
 
-      resp_dict = {'message': str(result)}
+      message = str(result)
+      if (result == 0):
+        message = 'Model imported'
+      resp_dict = {'message': message}
       resp = make_response(json_serialize(resp_dict, session_id=session_id), OK)
       resp.headers['Content-Type'] = 'application/json'
       return resp
@@ -90,12 +122,20 @@ class CImportTextAPI(Resource):
         dao = ImportDAO(session_id)
         result = dao.import_attack_tree(file_contents,environment_name,contributor_name)
         dao.close()
+        message = str(result)
+        if (result == 0):
+          message = 'Model imported'
+        resp_dict = {'message': message}
+        resp_dict = {'message': str(result)}
+        resp = make_response(json_serialize(resp_dict, session_id=session_id), OK)
+        resp.headers['Content-Type'] = 'application/json'
+        return resp
       except DatabaseProxyException as ex:
         raise ARMHTTPError(ex)
       except ARMException as ex:
         raise ARMHTTPError(ex)
       except Exception as ex:
-        raise CairisHTTPError(status_code=500,message=str(ex.message),status='Unknown error')
+        raise CairisHTTPError(status_code=500,message=str(ex),status='Unknown error')
     else:
       raise CairisHTTPError(status_code=BAD_REQUEST,message='The provided file is not a valid XML file',status='Invalid XML input')
 
@@ -130,11 +170,14 @@ class CImportFileAPI(Resource):
     except ARMException as ex:
       raise ARMHTTPError(ex)
     except Exception as ex:
-      raise CairisHTTPError(status_code=500,message=str(ex.message),status='Unknown error')
+      raise CairisHTTPError(status_code=500,message=str(ex),status='Unknown error')
 
     remove_file(abs_path)
 
-    resp_dict = { 'message': str(result) }
+    message = str(result)
+    if (result == 0):
+      message = file.filename + ' imported'
+    resp_dict = { 'message': message }
     resp = make_response(json_serialize(resp_dict, session_id=session_id), OK)
     resp.headers['Content-Type'] = 'application/json'
     return resp

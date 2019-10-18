@@ -111,11 +111,11 @@ class RiskDAO(CairisDAO):
       found_risk = self.simplify(found_risk)
     return found_risk
 
-  def get_risk_analysis_model(self, environment_name, dim_name, obj_name,model_layout):
+  def get_risk_analysis_model(self, environment_name, dim_name, obj_name,model_layout,isTagged = False):
     fontName, fontSize, apFontName = get_fonts(session_id=self.session_id)
     try:
       riskAnalysisModel = self.db_proxy.riskAnalysisModel(environment_name, dim_name, obj_name)
-      tLinks = EnvironmentModel(riskAnalysisModel, environment_name, self.db_proxy, model_layout, fontName=fontName, fontSize=fontSize)
+      tLinks = EnvironmentModel(riskAnalysisModel, environment_name, self.db_proxy, model_layout, fontName=fontName, fontSize=fontSize, isTagged=isTagged)
       dot_code = tLinks.graph()
       if not dot_code:
         raise ObjectNotFoundHTTPError('The risk analysis model')
@@ -246,13 +246,17 @@ class RiskDAO(CairisDAO):
       misuse_case = self.simplify(misuse_case)
     if hasattr(misuse_case,'theId'):
       del misuse_case.theId
-    del misuse_case.theEnvironmentDictionary
+      del misuse_case.theEnvironmentDictionary
 
     return misuse_case
 
   def get_misuse_case_by_threat_vulnerability(self, threat_name,vulnerability_name):
     try:
-      return self.simplify(cairis.core.MisuseCaseFactory.build(threat_name,vulnerability_name,self.db_proxy))
+      misuse_case = self.db_proxy.riskMisuseCase(-1,threat_name,vulnerability_name)
+      if misuse_case != None:
+        return self.simplify(misuse_case)
+      else:
+        return self.simplify(cairis.core.MisuseCaseFactory.build(threat_name,vulnerability_name,self.db_proxy))
     except DatabaseProxyException as ex:
       self.close()
       raise ARMHTTPError(ex)
@@ -428,7 +432,7 @@ class RiskDAO(CairisDAO):
     :rtype: RiskRating
     """
     try:
-      rating = self.db_proxy.riskRating(threat_name, vulnerability_name, environment_name)
+      rating = self.db_proxy.riskRating(-1,threat_name, vulnerability_name, environment_name)
       risk_rating = RiskRating(threat_name, vulnerability_name, environment_name, rating)
       return risk_rating
     except DatabaseProxyException as ex:
@@ -477,6 +481,7 @@ class RiskDAO(CairisDAO):
     elif isinstance(obj, MisuseCase):
       if hasattr(obj,'theId'):
         del obj.theId
+        del obj.theEnvironmentDictionary
       misuse_case = obj
 
     if isinstance(obj, Risk):

@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 #  Licensed to the Apache Software Foundation (ASF) under one
 #  or more contributor license agreements.  See the NOTICE file
 #  distributed with this work for additional information
@@ -19,6 +19,7 @@
 import argparse
 import os
 import sys
+from cairis.core.ARM import ARMException
 
 __author__ = 'Shamal Faily'
 
@@ -53,7 +54,7 @@ def file_import(importFile,mFormat,overwriteFlag,session_id = None):
 
   msgStr = ''
   if (mFormat == 'securitypattern' or mFormat == 'Security Pattern'):
-    msgStr += importSecurityPatternsFile(importFile,session_id = session_id)
+    msgStr += importSecurityPatternsFile(importFile,session_id)
   elif (mFormat == 'attackpattern' or mFormat == 'Attack Pattern'):
     msgStr += importAttackPattern(importFile,session_id)
   elif (mFormat == 'tvtypes' or mFormat == 'Threat and Vulnerability Types'):

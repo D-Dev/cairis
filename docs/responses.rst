@@ -3,13 +3,13 @@ Risk Responses
 
 A risk can be treated in several ways.
 
-By choosing to *Accept* a risk, we indicate that we are prepared to
+By choosing to *Accept* a risk, we indicate we are prepared to
 accept the consequences of the risk being realised. Accepting the risk
 comes with a cost, and responsibility for accepting a risk must fall on
 one or more roles.
 
 By choosing to *Transfer* a risk, we acknowledge that dealing with a
-risk is out of scope for this project. It may still, however, have a
+risk is out of scope for this project. It may, however, have a
 cost associated with it and, by accepting the risk, the risk must become
 the responsibility of one or more roles.
 
@@ -53,8 +53,7 @@ Adding, updating, and deleting a response
 Generating goals
 ----------------
 
-A goal can be generated from a response by right clicking on the
-response name in the Responses table, and selecting Generate Goal
-from the speed menu. This causes a goal to be generated in each of the
+A goal can be generated from a response by clicking on the Goal
+button in the responses table. This generates a goal in each of the
 environments the response is situated in. The goal name corresponds to
 the name of the response.

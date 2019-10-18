@@ -87,6 +87,7 @@ drop procedure if exists getRisks;
 drop procedure if exists getRisksSummary;
 drop function if exists threat_likelihood;
 drop function if exists vulnerability_severity;
+drop function if exists vulnerability_severity_rating;
 drop procedure if exists threat_asset;
 drop procedure if exists threat_attacker;
 drop procedure if exists delete_asset;
@@ -330,6 +331,7 @@ drop procedure if exists getUseCases;
 drop procedure if exists getUseCasesSummary;
 drop procedure if exists getMisuseCases;
 drop procedure if exists riskMisuseCase;
+drop procedure if exists riskMisuseCaseByTV;
 drop procedure if exists traceDimensionList;
 drop procedure if exists addRisk;
 drop procedure if exists updateRisk;
@@ -947,6 +949,43 @@ drop function if exists trustBoundaryPrivilege;
 drop procedure if exists unrelatedExceptionCheck;
 drop procedure if exists reassociateRequirement;
 drop procedure if exists locationsToXml;
+drop procedure if exists implicitAssetInclusionCheck;
+drop procedure if exists implicitAssetVulnerabilityCheck;
+drop function if exists lastNumericRequirementLabel;
+drop procedure if exists getDependency;
+drop function if exists assetAttackSurface;
+drop procedure if exists obstructedGoals;
+drop procedure if exists goalRoot;
+drop procedure if exists obstructedTasks;
+drop procedure if exists isGoalObstructed;
+drop procedure if exists isObstacleObstructed;
+drop procedure if exists setImage;
+drop procedure if exists getImage;
+drop procedure if exists getImages;
+drop procedure if exists tvTypesToJSON;
+drop function if exists jsonEscaped;
+drop procedure if exists domainValuesToJSON;
+drop procedure if exists projectToJSON;
+drop procedure if exists riskAnalysisToJSON;
+drop procedure if exists usabilityToJSON;
+drop procedure if exists goalsToJSON;
+drop procedure if exists templateGoalDependents;
+drop procedure if exists componentViewDependents;
+drop procedure if exists getGoalAssociation;
+drop procedure if exists obstructedRootGoals;
+drop procedure if exists checkDataFlowExists;
+drop procedure if exists riskModelTags;
+drop procedure if exists securityPatternClassModel;
+drop procedure if exists conceptMapModel_all;
+drop procedure if exists assetRequirementNames;
+drop procedure if exists environmentRequirementNames;
+drop function if exists hasRootObstacle;
+drop procedure if exists hasRootObstacles;
+drop procedure if exists deleteGeneratedObstacles;
+drop procedure if exists patternsToXml;
+drop procedure if exists inheritanceInconsistency;
+drop function if exists isClassAssociationPresent;
+drop procedure if exists isTracePresent;
 
 
 delimiter //
@@ -1915,9 +1954,11 @@ create procedure delete_threat(in threatId int)
 begin
   call deleteThreatComponents(threatId);
   delete from component_threat_target where threat_id = threatId;
+  delete from risk_threat where threat_id = threatId;
   delete from countermeasure_threat_target where threat_id = threatId;
   delete from threat_tag where threat_id = threatId;
   delete from threat_reference where threat_id = threatId;
+  delete from obstaclethreat_goalassociation where subgoal_id = threatId;
   delete from threat where id = threatId;
 end
 //
@@ -2345,13 +2386,23 @@ create function vulnerability_severity(vulId int,environmentId int)
 returns varchar(200)
 deterministic
 begin
+  declare severityName varchar(200);
+  select name into severityName from severity where id = vulnerability_severity_rating(vulId,environmentId);
+  return (severityName);
+end
+//
+
+create function vulnerability_severity_rating(vulId int,environmentId int)
+returns int
+deterministic
+begin
   declare compositeCount int;
   declare duplicatePolicy varchar(200);
   declare overridingEnvironmentId int;
   declare workingSeverityId int;
   declare currentEnvironmentId int;
   declare currentSeverityId int;
-  declare severityName varchar(200);
+  declare severityRating int;
   declare done int default 0;
   declare sevCursor cursor for select environment_id,severity_id from vulnerability_severity where vulnerability_id = vulId and environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId);
   declare continue handler for not found set done = 1;
@@ -2388,12 +2439,12 @@ begin
       end if;
     end loop sev_loop;
     close sevCursor;
-    select name into severityName from severity where id = workingSeverityId;
+    set severityRating = workingSeverityId;
   else
     select mitigated_severity(vulId,environmentId) into currentSeverityId;
-    select s.name into severityName from severity s where s.id = currentSeverityId;
+    set severityRating = currentSeverityId;
   end if;
-  return (severityName);
+  return severityRating;
 end
 //
 
@@ -2534,6 +2585,7 @@ begin
   delete from countermeasure_vulnerability_target where vulnerability_id = vulId;
   delete from component_vulnerability_target where vulnerability_id = vulId;
   delete from requirement_vulnerability where vulnerability_id = vulId;
+  delete from risk_vulnerability where vulnerability_id = vulId;
   delete from obstaclevulnerability_goalassociation where subgoal_id = vulId;
   delete from vulnerability_tag where vulnerability_id = vulId;
   delete from vulnerability_reference where vulnerability_id = vulId;
@@ -2701,7 +2753,7 @@ begin
 end
 //
 
-create procedure riskRating(in threatName text, in vulName text, in environmentName text)
+create procedure riskRating(in riskId int, in threatName text, in vulName text, in environmentName text)
 begin
   declare compositeCount int;
   declare duplicatePolicy varchar(50);
@@ -2713,6 +2765,12 @@ begin
   declare environmentId int;
   declare environmentCursor cursor for select environment_id from composite_environment where composite_environment_id = environmentId;  
   declare continue handler for not found set done = 1;
+
+  if riskId != -1
+  then
+    select t.name into threatName from threat t, risk r where r.id = riskId and r.threat_id = t.id limit 1;
+    select v.name into vulName from vulnerability v, risk r where r.id = riskId and r.vulnerability_id = v.id limit 1;
+  end if;
 
   select id into environmentId from environment where name = environmentName;
   select count(environment_id) into compositeCount from composite_environment where composite_environment_id = environmentId limit 1;
@@ -3353,9 +3411,10 @@ create procedure addUseCaseStepException(in ucId int, in envName text, in stepNo
 begin
   declare envId int;
   declare goalId int;
+  declare obsId int;
+  declare assocId int;
   declare catTypeId int;
-  declare reqLabel int;
-  declare shortCode varchar(100);
+  declare ucName varchar(200);
 
   select id into envId from environment where name = envName;
   select id into catTypeId from obstacle_category_type where name = catName;
@@ -3372,6 +3431,22 @@ begin
   then
     select o.id into goalId from requirement o where o.name = dimName and o.version = (select max(i.version) from requirement i where i.id = o.id);
     insert into usecase_step_requirement_exception(usecase_id,environment_id,step_no,name,goal_id,category_type_id,description) values (ucId,envId,stepNo,exName,goalId,catTypeId,excDesc);
+  end if;
+
+  if dimType = 'goal' or dimType = 'requirement'
+  then
+    select name into ucName from usecase where id = ucId limit 1;
+    select id into obsId from obstacle where name = exName limit 1;
+    if obsId is null
+    then
+      call newId1(obsId);
+      call addObstacle(obsId,exName,'CAIRIS');
+      call add_obstacle_environment(obsId,envName);
+      call addObstacleDefinition(obsId,envName,excDesc,0.0,'None');
+      call addObstacleCategory(obsId,envName,catName);
+    end if;
+    call newId1(assocId);
+    call addGoalAssociation(assocId,envName,dimName,dimType,'obstruct',exName,'obstacle',0,concat('Obstructs use case ',ucName));
   end if;
 end
 //
@@ -3573,6 +3648,7 @@ begin
   delete from usecase_role where usecase_id = ucId;
   delete from usecase_conditions where usecase_id = ucId;
   delete from usecase_step where usecase_id = ucId;
+  call deleteGeneratedObstacles(ucId);
   delete from usecase_step_none_exception where usecase_id = ucId;
   delete from usecase_step_goal_exception where usecase_id = ucId;
   delete from usecase_step_requirement_exception where usecase_id = ucId;
@@ -3828,17 +3904,17 @@ begin
   then
     select 'goal',g.name from goal g, environment_goal eg where eg.environment_id = environmentId and eg.goal_id = g.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement r, asset_requirement ar, environment_asset ea, asset a, goalrequirement_goalassociation ga where ea.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and ga.subgoal_id = r.id and ga.environment_id = ea.environment_id
+    select 'requirement',r.name from requirement r, asset_requirement ar, environment_asset ea, asset a, goalrequirement_goalassociation ga where ea.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and ga.subgoal_id = r.id and ga.environment_id = ea.environment_id
     union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement r, environment_requirement er, environment e, goalrequirement_goalassociation ga where er.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and ga.subgoal_id = r.id and ga.environment_id = er.environment_id
+    select 'requirement',r.name from requirement r, environment_requirement er, environment e, goalrequirement_goalassociation ga where er.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and ga.subgoal_id = r.id and ga.environment_id = er.environment_id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement r, asset_requirement ar, environment_asset ea, asset a, requirement_usecase ru, environment_usecase eu where ea.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and ru.requirement_id = r.id and ru.usecase_id = eu.usecase_id and eu.environment_id = ea.environment_id
+    select 'requirement',r.name from requirement r, asset_requirement ar, environment_asset ea, asset a, requirement_usecase ru, environment_usecase eu where ea.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and ru.requirement_id = r.id and ru.usecase_id = eu.usecase_id and eu.environment_id = ea.environment_id
     union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement r, environment_requirement er, environment e, requirement_usecase ru, environment_usecase eu where er.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and ru.requirement_id = r.id and ru.usecase_id = eu.usecase_id and eu.environment_id = er.environment_id
+    select 'requirement',r.name from requirement r, environment_requirement er, environment e, requirement_usecase ru, environment_usecase eu where er.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and ru.requirement_id = r.id and ru.usecase_id = eu.usecase_id and eu.environment_id = er.environment_id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement r, asset_requirement ar, environment_asset ea, asset a, requirement_task rt, environment_task et where ea.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and rt.requirement_id = r.id and rt.task_id = et.task_id and et.environment_id = ea.environment_id
+    select 'requirement',r.name from requirement r, asset_requirement ar, environment_asset ea, asset a, requirement_task rt, environment_task et where ea.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and rt.requirement_id = r.id and rt.task_id = et.task_id and et.environment_id = ea.environment_id
     union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement r, environment_requirement er, environment e, requirement_task rt, environment_task et where er.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and rt.requirement_id = r.id and rt.task_id = et.task_id and et.environment_id = er.environment_id
+    select 'requirement',r.name from requirement r, environment_requirement er, environment e, requirement_task rt, environment_task et where er.environment_id = environmentId and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and rt.requirement_id = r.id and rt.task_id = et.task_id and et.environment_id = er.environment_id
     union
     select 'usecase',u.name from usecase u, requirement_usecase ru, asset_requirement ar, environment_asset ea, environment_usecase eu  where eu.environment_id = environmentId and eu.usecase_id = ru.usecase_id and ru.usecase_id = u.id and ru.requirement_id = ar.requirement_id and ar.asset_id = ea.asset_id and ea.environment_id = eu.environment_id
     union
@@ -3860,9 +3936,9 @@ begin
     union
     select 'countermeasure',c.name from requirement_countermeasure rc, countermeasure c where rc.environment_id = environmentId and rc.countermeasure_id = c.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from requirement_countermeasure rc, requirement r, asset_requirement rmr, asset rm where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id 
+    select 'requirement',r.name from requirement_countermeasure rc, requirement r, asset_requirement rmr, asset rm where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id 
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from requirement_countermeasure rc, requirement r, environment_requirement rmr, environment rm where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id 
+    select 'requirement',r.name from requirement_countermeasure rc, requirement r, environment_requirement rmr, environment rm where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id 
     union
     select 'task', t.name from environment e, countermeasure_task_persona ctp, task t, countermeasure c where ctp.environment_id = e.id and ctp.task_id = t.id and ctp.countermeasure_id = c.id and ctp.environment_id = environmentId and (ctp.duration_id > 0 or ctp.frequency_id > 0 or ctp.demands_id > 0 or ctp.goalsupport_id > 0)
     union
@@ -3902,31 +3978,27 @@ begin
     union
     select 'obstacle',o.name from obstacle o, environment_obstacle eo where eo.environment_id = environmentId and eo.obstacle_id = o.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from requirementobstacle_goalassociation ro, requirement r, asset_requirement rmr, asset rm, environment_obstacle eo where ro.environment_id = environmentId and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id and ro.subgoal_id = eo.obstacle_id and eo.environment_id = ro.environment_id
+    select 'requirement',r.name from requirementobstacle_goalassociation ro, requirement r, asset_requirement rmr, asset rm, environment_obstacle eo where ro.environment_id = environmentId and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id and ro.subgoal_id = eo.obstacle_id and eo.environment_id = ro.environment_id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from obstaclerequirement_goalassociation obr, requirement r, asset_requirement rmr, asset rm, environment_obstacle eo where obr.environment_id = environmentId and obr.subgoal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id and obr.goal_id = eo.obstacle_id  and eo.environment_id = obr.environment_id
+    select 'requirement',r.name from obstaclerequirement_goalassociation obr, requirement r, asset_requirement rmr, asset rm, environment_obstacle eo where obr.environment_id = environmentId and obr.subgoal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id and obr.goal_id = eo.obstacle_id  and eo.environment_id = obr.environment_id
     union
     select 'obstacle',o.name from obstacle o, obstacledomainproperty_goalassociation od where od.environment_id = environmentId and od.goal_id = o.id
     union
     select 'domainproperty',dp.name from domainproperty dp, obstacledomainproperty_goalassociation od where od.environment_id = environmentId and od.subgoal_id = dp.id;
-/*    union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
-    union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id; */
   else
     select 'goal',g.name from goal g, environment_goal eg where eg.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eg.goal_id = g.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement r, asset_requirement ar, environment_asset ea, asset a where ea.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id
+    select 'requirement',r.name from requirement r, asset_requirement ar, environment_asset ea, asset a where ea.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement r, environment_requirement ar, environment a where ar.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.environment_id = a.id
+    select 'requirement',r.name from requirement r, environment_requirement ar, environment a where ar.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.environment_id = a.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement r, asset_requirement ar, environment_asset ea, asset a, requirement_usecase ru, environment_usecase eu where ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and ru.requirement_id = r.id and ru.usecase_id = eu.usecase_id and eu.environment_id = ea.environment_id
+    select 'requirement',r.name from requirement r, asset_requirement ar, environment_asset ea, asset a, requirement_usecase ru, environment_usecase eu where ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and ru.requirement_id = r.id and ru.usecase_id = eu.usecase_id and eu.environment_id = ea.environment_id
     union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement r, environment_requirement er, environment e, requirement_usecase ru, environment_usecase eu where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and ru.requirement_id = r.id and ru.usecase_id = eu.usecase_id and eu.environment_id = er.environment_id
+    select 'requirement',r.name from requirement r, environment_requirement er, environment e, requirement_usecase ru, environment_usecase eu where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and ru.requirement_id = r.id and ru.usecase_id = eu.usecase_id and eu.environment_id = er.environment_id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement r, asset_requirement ar, environment_asset ea, asset a, requirement_task rt, environment_task et where ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and rt.requirement_id = r.id and rt.task_id = et.task_id and et.environment_id = ea.environment_id
+    select 'requirement',r.name from requirement r, asset_requirement ar, environment_asset ea, asset a, requirement_task rt, environment_task et where ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and ea.asset_id = a.id and rt.requirement_id = r.id and rt.task_id = et.task_id and et.environment_id = ea.environment_id
     union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement r, environment_requirement er, environment e, requirement_task rt, environment_task et where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and rt.requirement_id = r.id and rt.task_id = et.task_id and et.environment_id = er.environment_id
+    select 'requirement',r.name from requirement r, environment_requirement er, environment e, requirement_task rt, environment_task et where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and rt.requirement_id = r.id and rt.task_id = et.task_id and et.environment_id = er.environment_id
     union
     select 'usecase',u.name from usecase u, requirement_usecase ru, asset_requirement ar, environment_asset ea, environment_usecase eu  where eu.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eu.usecase_id = ru.usecase_id and ru.usecase_id = u.id and ru.requirement_id = ar.requirement_id and ar.asset_id = ea.asset_id and ea.environment_id = eu.environment_id
     union
@@ -3948,9 +4020,9 @@ begin
     union
     select 'countermeasure',c.name from requirement_countermeasure rc, countermeasure c where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.countermeasure_id = c.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from requirement_countermeasure rc, requirement r, asset_requirement rmr, asset rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement',r.name from requirement_countermeasure rc, requirement r, asset_requirement rmr, asset rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from requirement_countermeasure rc, requirement r, asset_requirement rmr, asset rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement',r.name from requirement_countermeasure rc, requirement r, asset_requirement rmr, asset rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
     select 'task', t.name from environment e, countermeasure_task_persona ctp, task t, countermeasure c where ctp.environment_id = e.id and ctp.task_id = t.id and ctp.countermeasure_id = c.id and ctp.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and (ctp.duration_id > 0 or ctp.frequency_id > 0 or ctp.demands_id > 0 or ctp.goalsupport_id > 0)
     union
@@ -3986,15 +4058,15 @@ begin
     union
     select 'goal',g.name from goalobstacle_goalassociation go, goal g, environment_goal eg where go.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and go.goal_id = g.id and go.environment_id = eg.environment_id and go.goal_id = eg.goal_id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from requirementobstacle_goalassociation ro, requirement r, asset_requirement rmr, asset rm where ro.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement',r.name from requirementobstacle_goalassociation ro, requirement r, asset_requirement rmr, asset rm where ro.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from obstaclerequirement_goalassociation obr, requirement r, asset_requirement rmr, asset rm where obr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and obr.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement',r.name from obstaclerequirement_goalassociation obr, requirement r, asset_requirement rmr, asset rm where obr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and obr.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
     select 'obstacle',o.name from obstacle o, environment_obstacle eo where eo.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eo.obstacle_id = o.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
+    select 'requirement',r.name from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id
+    select 'requirement',r.name from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id
     union
     select 'obstacle',o.name from obstacle o, obstacledomainproperty_goalassociation od where od.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and od.goal_id = g.id
     union
@@ -4016,11 +4088,11 @@ begin
     union
     select 'obstacle',g.name from obstacle g, obstaclerole_goalassociation gr where gr.environment_id = environmentId and gr.goal_id = g.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirementrole_goalassociation rr, requirement r,asset_requirement ar, asset a where rr.environment_id = environmentId and rr.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
+    select 'requirement',r.name from requirementrole_goalassociation rr, requirement r,asset_requirement ar, asset a where rr.environment_id = environmentId and rr.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
+    select 'requirement',r.name from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id
+    select 'requirement',r.name from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id
     union
     select 'role',r.name from role r, requirement_role rr where rr.role_id = r.id
     union
@@ -4060,7 +4132,7 @@ begin
     union
     select 'obstacle',g.name from obstacle g, obstaclerole_goalassociation gr where gr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and gr.goal_id = g.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirementrole_goalassociation rr, requirement r,asset_requirement ar, asset a where rr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rr.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
+    select 'requirement',r.name from requirementrole_goalassociation rr, requirement r,asset_requirement ar, asset a where rr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rr.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
     union
     select 'role',r.name from role r, goalrole_goalassociation gr where gr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and gr.subgoal_id = r.id
     union
@@ -4094,9 +4166,9 @@ begin
     union
     select 'role',r.name from role r,roleassetrole_dependency rar where rar.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rar.dependee_id = r.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
+    select 'requirement',r.name from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id
+    select 'requirement',r.name from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id
     union
     select 'role',r.name from role r, requirement_role rr where rr.role_id = r.id;
   end if;
@@ -4116,11 +4188,11 @@ begin
   then
     select 'goal',g.name from goal g, goalrole_goalassociation gr where gr.environment_id = environmentId and gr.goal_id = g.id and gr.subgoal_id = roleId
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirementrole_goalassociation rr, requirement r,asset_requirement ar, asset a where rr.environment_id = environmentId and rr.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and rr.subgoal_id = roleId
+    select 'requirement',r.name from requirementrole_goalassociation rr, requirement r,asset_requirement ar, asset a where rr.environment_id = environmentId and rr.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and rr.subgoal_id = roleId
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and rr.role_id = roleId
+    select 'requirement',r.name from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id and rr.role_id = roleId
     union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and rr.role_id = roleId
+    select 'requirement',r.name from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id and rr.role_id = roleId
     union
     select 'role',r.name from role r, requirement_role rr where rr.role_id = r.id and rr.role_id = roleId
     union
@@ -4156,7 +4228,7 @@ begin
   else
     select 'goal',g.name from goal g, goalrole_goalassociation gr where gr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and gr.goal_id = g.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirementrole_goalassociation rr, requirement r,asset_requirement ar, asset a where rr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rr.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
+    select 'requirement',r.name from requirementrole_goalassociation rr, requirement r,asset_requirement ar, asset a where rr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rr.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
     union
     select 'role',r.name from role r, goalrole_goalassociation gr where gr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and gr.subgoal_id = r.id
     union
@@ -4188,9 +4260,9 @@ begin
     union
     select 'role',r.name from role r,roleassetrole_dependency rar where rar.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rar.dependee_id = r.id
     union
-    select 'requirement',concat(a.short_code,'-',r.label) from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
+    select 'requirement',r.name from requirement_role rr, requirement r,asset_requirement ar, asset a where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select 'requirement',concat(e.short_code,'-',r.label) from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id
+    select 'requirement',r.name from requirement_role rr, requirement r,environment_requirement er, environment e where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = er.requirement_id and er.environment_id = e.id
     union
     select 'role',r.name from role r, requirement_role rr where rr.role_id = r.id;
   end if;
@@ -4596,6 +4668,8 @@ create procedure threatDependents(in threatId int)
 begin
   declare riskId int;
   declare riskName varchar(200);
+  declare obsId int;
+  declare obsName varchar(100);
   declare done int default 0;
   declare riskCursor cursor for select distinct id,name from risk where threat_id = threatId;  
   declare continue handler for not found set done = 1;
@@ -4618,8 +4692,14 @@ create procedure riskDependents(in riskId int)
 begin
   declare responseId int;
   declare responseName varchar(100);
+  declare vulId int;
+  declare vulName varchar(200);
+  declare threatId int;
+  declare threatName varchar(200);
   declare done int default 0;
   declare responseCursor cursor for select distinct id,name from response where risk_id = riskId;  
+  declare vulCursor cursor for select distinct v.id,v.name from vulnerability v, risk_vulnerability rv where rv.risk_id = riskId and rv.vulnerability_id = v.id;
+  declare thrCursor cursor for select distinct t.id,t.name from threat t, risk_threat rt where rt.risk_id = riskId and rt.threat_id = t.id;
   declare continue handler for not found set done = 1;
 
   open responseCursor;
@@ -4633,6 +4713,35 @@ begin
     call responseDependents(responseId);
   end loop response_loop;
   close responseCursor;
+
+  set done = 0;
+
+  open vulCursor;
+  vul_loop: loop
+    fetch vulCursor into vulId,vulName;
+    if done = 1
+    then
+      leave vul_loop;
+    end if;
+    insert into temp_vulnerability values(vulId,vulName);
+    call vulnerabilityDependents(vulId);
+  end loop vul_loop;
+  close vulCursor;
+
+  set done = 0;
+
+  open thrCursor;
+  thr_loop: loop
+    fetch thrCursor into threatId,threatName;
+    if done = 1
+    then
+      leave thr_loop;
+    end if;
+    insert into temp_threat values(threatId,threatName);
+    call threatDependents(threatId);
+  end loop thr_loop;
+  close thrCursor;
+
 end
 //
 
@@ -4740,7 +4849,7 @@ begin
   declare assetCountermeasures int;
   declare taskCountermeasures int;
   declare taskId int;
-  declare taskName varchar(50);
+  declare taskName varchar(200);
   declare done int default 0;
   declare assetCursor cursor for select distinct ca.asset_id,a.name from countermeasure_asset ca, asset a where ca.countermeasure_id = cmId and ca.asset_id = a.id;  
   declare taskCursor cursor for select distinct ct.subgoal_id,t.name from countermeasuretask_goalassociation ct, task t where ct.subgoal_id = cmId and ct.goal_id = t.id;  
@@ -4813,7 +4922,7 @@ begin
   declare vulId int;
   declare vulName varchar(200);
   declare taskId int;
-  declare taskName varchar(50);
+  declare taskName varchar(200);
   declare reqAssets int;
   declare threatAssets int;
   declare vulnerabilityAssets int;
@@ -4960,6 +5069,7 @@ begin
   drop table if exists temp_usecase;
   drop table if exists temp_misusecase;
   drop table if exists temp_persona;
+  drop table if exists temp_component_view;
   create temporary table temp_asset (id INT NOT NULL,name VARCHAR(200) NOT NULL);
   create temporary table temp_attacker (id INT NOT NULL,name VARCHAR(200) NOT NULL);
   create temporary table temp_domainproperty (id INT NOT NULL,name VARCHAR(200) NOT NULL);
@@ -4976,6 +5086,7 @@ begin
   create temporary table temp_usecase (id INT NOT NULL,name VARCHAR(200) NOT NULL);
   create temporary table temp_misusecase (id INT NOT NULL,name VARCHAR(200) NOT NULL);
   create temporary table temp_persona (id INT NOT NULL,name VARCHAR(200) NOT NULL);
+  create temporary table temp_component_view (id INT NOT NULL,name VARCHAR(255) NOT NULL);
 
   if (dimName = 'attacker')
   then
@@ -5062,6 +5173,16 @@ begin
     call securityPatternDependents(dimId);
   end if;
 
+  if (dimName = 'template_goal')
+  then
+    call templateGoalDependents(dimId);
+  end if;
+
+  if (dimName = 'component_view')
+  then
+    call componentViewDependents(dimId);
+  end if;
+
   select distinct 'countermeasure',id,name from temp_countermeasure
   union
   select distinct 'goal',id,name from temp_goal
@@ -5092,7 +5213,9 @@ begin
   union
   select distinct 'asset',id,name from temp_asset
   union
-  select distinct 'role',id,name from temp_role;
+  select distinct 'role',id,name from temp_role
+  union
+  select distinct 'architectural_pattern',id,name from temp_component_view;
 end
 //
 
@@ -5131,38 +5254,41 @@ begin
   declare environmentId int;
   select id into environmentId from environment where name = environmentName limit 1;
 
-  select 'requirement' from_objt, r.name from_name, 'task' to_objt, s.name to_name from task s, requirement r, asset a, asset_requirement ar, environment_task cs,requirement_task sr where cs.environment_id = environmentId and cs.task_id = s.id and cs.task_id = sr.task_id and sr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
+  select 'requirement' from_objt, r.name from_name, 'task' to_objt, s.name to_name,'supports' label from task s, requirement r, asset a, asset_requirement ar, environment_task cs,requirement_task sr where cs.environment_id = environmentId and cs.task_id = s.id and cs.task_id = sr.task_id and sr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
   union
-  select 'requirement' from_objt, r.name from_name, 'task' to_objt, s.name to_name from task s, requirement r, environment a, environment_requirement ar, environment_task cs,requirement_task sr where cs.environment_id = environmentId and cs.task_id = s.id and cs.task_id = sr.task_id and sr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.environment_id = a.id
+  select 'requirement' from_objt, r.name from_name, 'task' to_objt, s.name to_name, 'supports' label from task s, requirement r, environment a, environment_requirement ar, environment_task cs,requirement_task sr where cs.environment_id = environmentId and cs.task_id = s.id and cs.task_id = sr.task_id and sr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.environment_id = a.id
   union
-  select 'requirement' from_objt, r.name from_name, 'usecase' to_objt, s.name to_name from usecase s, requirement r, asset a, asset_requirement ar, environment_usecase cs,requirement_usecase sr where cs.environment_id = environmentId and cs.usecase_id = s.id and cs.usecase_id = sr.usecase_id and sr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
+  select 'requirement' from_objt, r.name from_name, 'usecase' to_objt, s.name to_name, 'supports' label from usecase s, requirement r, asset a, asset_requirement ar, environment_usecase cs,requirement_usecase sr where cs.environment_id = environmentId and cs.usecase_id = s.id and cs.usecase_id = sr.usecase_id and sr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.asset_id = a.id
   union
-  select 'requirement' from_objt, r.name from_name, 'usecase' to_objt, s.name to_name from usecase s, requirement r, environment a, environment_requirement ar, environment_usecase cs,requirement_usecase sr where cs.environment_id = environmentId and cs.usecase_id = s.id and cs.usecase_id = sr.usecase_id and sr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.environment_id = a.id
+  select 'requirement' from_objt, r.name from_name, 'usecase' to_objt, s.name to_name, 'supports' from usecase s, requirement r, environment a, environment_requirement ar, environment_usecase cs,requirement_usecase sr where cs.environment_id = environmentId and cs.usecase_id = s.id and cs.usecase_id = sr.usecase_id and sr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ar.requirement_id and ar.environment_id = a.id
   union
-  select 'requirement' from_objt, fr.name from_name, 'requirement' to_objt, tr.name to_name from requirement fr, asset_requirement far, asset fa, requirement tr, asset_requirement tar, asset ta, requirementrequirement_goalassociation rr where rr.goal_id = fr.id and rr.subgoal_id = tr.id and fr.version = (select max(i.version) from requirement i where i.id = fr.id) and tr.version = (select max(i.version) from requirement i where i.id = tr.id) and fr.id = far.requirement_id and far.asset_id = fa.id and tr.id = tar.requirement_id and tar.asset_id = ta.id
+  select 'requirement' from_objt, fr.name from_name, 'requirement' to_objt, tr.name to_name,rt.name label from requirement fr, asset_requirement far, asset fa, requirement tr, asset_requirement tar, asset ta, requirementrequirement_goalassociation rr, reference_type rt where rr.goal_id = fr.id and rr.subgoal_id = tr.id and fr.version = (select max(i.version) from requirement i where i.id = fr.id) and tr.version = (select max(i.version) from requirement i where i.id = tr.id) and fr.id = far.requirement_id and far.asset_id = fa.id and tr.id = tar.requirement_id and tar.asset_id = ta.id and rr.ref_type_id = rt.id
   union
-  select 'usecase' from_objt, u.name from_name, 'task' to_objt, t.name to_name from usecase_task ut, environment_usecase eu, environment_task et, usecase u, task t where eu.environment_id = environmentId and eu.environment_id = et.environment_id and ut.usecase_id = eu.usecase_id and eu.usecase_id = u.id and ut.task_id = et.task_id and et.task_id = t.id
+  select 'usecase' from_objt, u.name from_name, 'task' to_objt, t.name to_name, 'supports' label from usecase_task ut, environment_usecase eu, environment_task et, usecase u, task t where eu.environment_id = environmentId and eu.environment_id = et.environment_id and ut.usecase_id = eu.usecase_id and eu.usecase_id = u.id and ut.task_id = et.task_id and et.task_id = t.id
   union
-  select 'task' from_objt, s.name from_name, 'asset' to_objt, a.name to_name from task_asset sa, environment_asset ca, environment_task cs, asset a, task s where ca.environment_id = environmentId and cs.environment_id = environmentId and cs.task_id = sa.task_id and sa.task_id = s.id and ca.asset_id = sa.asset_id and sa.asset_id = a.id
+  select 'task' from_objt, s.name from_name, 'asset' to_objt, a.name to_name, 'supports' label from task_asset sa, environment_asset ca, environment_task cs, asset a, task s where ca.environment_id = environmentId and cs.environment_id = environmentId and cs.task_id = sa.task_id and sa.task_id = s.id and ca.asset_id = sa.asset_id and sa.asset_id = a.id
   union
-  select 'task' from_objt, s.name from_name, 'vulnerability' to_objt, v.name to_name from task_vulnerability sv, environment_vulnerability cv, environment_task cs, vulnerability v, task s where cv.environment_id = environmentId and cs.environment_id = environmentId and cs.task_id = sv.task_id and sv.task_id = s.id and cv.vulnerability_id = sv.vulnerability_id and sv.vulnerability_id = v.id
+  select 'task' from_objt, s.name from_name, 'vulnerability' to_objt, v.name to_name, 'supports' label from task_vulnerability sv, environment_vulnerability cv, environment_task cs, vulnerability v, task s where cv.environment_id = environmentId and cs.environment_id = environmentId and cs.task_id = sv.task_id and sv.task_id = s.id and cv.vulnerability_id = sv.vulnerability_id and sv.vulnerability_id = v.id
   union
-  select 'requirement' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name from requirement r, asset_requirement ar, asset a, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv where cv.environment_id = environmentId and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = ar.requirement_id and ar.asset_id = a.id
+  select 'risk' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name, 'supports' label from risk_vulnerability rv, environment_risk er, environment_vulnerability ev, risk r, vulnerability v where er.environment_id = environmentId and ev.environment_id = environmentId and er.id = rv.risk_id and rv.risk_id = r.id and ev.vulnerability_id = rv.vulnerability_id and rv.vulnerability_id = v.id
   union
-  select 'domainproperty' from_objt, dp.name from_name, 'asset' to_objt, a.name to_name from domainproperty dp, domainproperty_asset da, environment_asset ea, asset a where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = da.asset_id and dp.id = da.domainproperty_id
+  select 'risk' from_objt, r.name from_name, 'threat' to_objt, t.name to_name, 'supports' label from risk_threat rt, environment_risk er, environment_threat et, risk r, threat t where er.environment_id = environmentId and et.environment_id = environmentId and er.id = rt.risk_id and rt.risk_id = r.id and et.threat_id = rt.threat_id and rt.threat_id = t.id
   union
-  select 'requirement' from_objt, r.name from_name, 'role' to_objt, ro.name to_name from requirement r, asset_requirement ar, asset a, role ro, requirement_role rr where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rr.role_id = ro.id and r.id = ar.requirement_id and ar.asset_id = a.id
+  select 'requirement' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name, 'supports' label from requirement r, asset_requirement ar, asset a, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv where cv.environment_id = environmentId and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = ar.requirement_id and ar.asset_id = a.id
   union
-  select 'requirement' from_objt, r.name from_name, 'role' to_objt, ro.name to_name from requirement r, environment_requirement er, environment e, role ro, requirement_role rr where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rr.role_id = ro.id and r.id = er.requirement_id and er.environment_id = e.id
+  select 'domainproperty' from_objt, dp.name from_name, 'asset' to_objt, a.name to_name, 'supports' label from domainproperty dp, domainproperty_asset da, environment_asset ea, asset a where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = da.asset_id and dp.id = da.domainproperty_id
   union
-  select 'requirement' from_objt, fr.name from_name, 'requirement' to_objt, tr.name to_name from requirement fr, asset_requirement far, asset fa, environment_asset fae, requirement tr, asset_requirement tar, asset ta, environment_asset tae, requirement_requirement rr where rr.from_id = fr.id and fr.id = far.requirement_id and far.asset_id = fa.id and fr.version = (select max(i.version) from requirement i where i.id = fr.id) and rr.to_id = tr.id and tr.id = tar.requirement_id and tar.asset_id = ta.id and tr.version = (select max(i.version) from requirement i where i.id = tr.id) and far.asset_id = fae.asset_id and fae.environment_id = environmentId and fae.environment_id = tae.environment_id and tae.asset_id = tar.asset_id
+  select 'requirement' from_objt, r.name from_name, 'role' to_objt, ro.name to_name,'supports' label from requirement r, asset_requirement ar, asset a, role ro, requirement_role rr where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rr.role_id = ro.id and r.id = ar.requirement_id and ar.asset_id = a.id
   union
-  select 'requirement' from_objt, fr.name from_name, 'requirement' to_objt, tr.name to_name from requirement fr, asset_requirement far, asset fa, environment_asset fae, requirement tr, environment_requirement ter, environment te, requirement_requirement rr where rr.from_id = fr.id and fr.id = far.requirement_id and far.asset_id = fa.id and fr.version = (select max(i.version) from requirement i where i.id = fr.id) and rr.to_id = tr.id and tr.id = ter.requirement_id and ter.environment_id = te.id and tr.version = (select max(i.version) from requirement i where i.id = tr.id) and far.asset_id = fae.asset_id and fae.environment_id = environmentId and fae.environment_id = ter.environment_id
+  select 'requirement' from_objt, r.name from_name, 'role' to_objt, ro.name to_name, 'supports' label from requirement r, environment_requirement er, environment e, role ro, requirement_role rr where rr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rr.role_id = ro.id and r.id = er.requirement_id and er.environment_id = e.id
   union
-  select 'requirement' from_objt, fr.name from_name, 'requirement' to_objt, tr.name to_name from requirement fr, environment_requirement fer, environment fe, requirement tr, asset_requirement tar, asset ta, environment_asset tae, requirement_requirement rr where rr.from_id = fr.id and fr.id = fer.requirement_id and fer.environment_id = fe.id and fr.version = (select max(i.version) from requirement i where i.id = fr.id) and rr.to_id = tr.id and tr.id = tar.requirement_id and tar.asset_id = ta.id and tr.version = (select max(i.version) from requirement i where i.id = tr.id) and fer.environment_id = environmentId and fer.environment_id = tae.environment_id and tae.asset_id = tar.asset_id
+  select 'requirement' from_objt, fr.name from_name, 'requirement' to_objt, tr.name to_name,rr.label from requirement fr, asset_requirement far, asset fa, environment_asset fae, requirement tr, asset_requirement tar, asset ta, environment_asset tae, requirement_requirement rr where rr.from_id = fr.id and fr.id = far.requirement_id and far.asset_id = fa.id and fr.version = (select max(i.version) from requirement i where i.id = fr.id) and rr.to_id = tr.id and tr.id = tar.requirement_id and tar.asset_id = ta.id and tr.version = (select max(i.version) from requirement i where i.id = tr.id) and far.asset_id = fae.asset_id and fae.environment_id = environmentId and fae.environment_id = tae.environment_id and tae.asset_id = tar.asset_id
   union
-  select 'requirement' from_objt, fr.name from_name, 'requirement' to_objt, tr.name to_name from requirement fr, environment_requirement fer, environment fe, requirement tr, environment_requirement ter, environment te, requirement_requirement rr where rr.from_id = fr.id and fr.id = fer.requirement_id and fer.environment_id = fe.id and fr.version = (select max(i.version) from requirement i where i.id = fr.id) and rr.to_id = tr.id and tr.id = ter.requirement_id and ter.environment_id = te.id and tr.version = (select max(i.version) from requirement i where i.id = tr.id) and fer.environment_id = environmentId and fer.environment_id = ter.environment_id;
-
+  select 'requirement' from_objt, fr.name from_name, 'requirement' to_objt, tr.name to_name,rr.label from requirement fr, asset_requirement far, asset fa, environment_asset fae, requirement tr, environment_requirement ter, environment te, requirement_requirement rr where rr.from_id = fr.id and fr.id = far.requirement_id and far.asset_id = fa.id and fr.version = (select max(i.version) from requirement i where i.id = fr.id) and rr.to_id = tr.id and tr.id = ter.requirement_id and ter.environment_id = te.id and tr.version = (select max(i.version) from requirement i where i.id = tr.id) and far.asset_id = fae.asset_id and fae.environment_id = environmentId and fae.environment_id = ter.environment_id
+  union
+  select 'requirement' from_objt, fr.name from_name, 'requirement' to_objt, tr.name to_name,rr.label from requirement fr, environment_requirement fer, environment fe, requirement tr, asset_requirement tar, asset ta, environment_asset tae, requirement_requirement rr where rr.from_id = fr.id and fr.id = fer.requirement_id and fer.environment_id = fe.id and fr.version = (select max(i.version) from requirement i where i.id = fr.id) and rr.to_id = tr.id and tr.id = tar.requirement_id and tar.asset_id = ta.id and tr.version = (select max(i.version) from requirement i where i.id = tr.id) and fer.environment_id = environmentId and fer.environment_id = tae.environment_id and tae.asset_id = tar.asset_id
+  union
+  select 'requirement' from_objt, fr.name from_name, 'requirement' to_objt, tr.name to_name,rr.label from requirement fr, environment_requirement fer, environment fe, requirement tr, environment_requirement ter, environment te, requirement_requirement rr where rr.from_id = fr.id and fr.id = fer.requirement_id and fer.environment_id = fe.id and fr.version = (select max(i.version) from requirement i where i.id = fr.id) and rr.to_id = tr.id and tr.id = ter.requirement_id and ter.environment_id = te.id and tr.version = (select max(i.version) from requirement i where i.id = tr.id) and fer.environment_id = environmentId and fer.environment_id = ter.environment_id;
 end
 //
 
@@ -5225,8 +5351,6 @@ begin
   then
     select 'asset' from_objt,a.name from_name, 'threat' to_objt,t.name to_name from asset_threat at,asset a, threat t where at.environment_id = environmentId and at.asset_id = a.id and at.threat_id = t.id
     union
-    select 'asset' from_objt,a.name from_name, 'tag' to_objt,t.name to_name from asset_tag at,asset a, tag t, environment_asset ea where ea.environment_id = environmentId and ea.asset_id = a.id and at.asset_id = ea.asset_id and at.tag_id = t.id
-    union
     select 'asset' from_objt,a.name from_name,'vulnerability' to_objt, v.name to_name from asset_vulnerability av, asset a, vulnerability v where av.environment_id = environmentId and av.vulnerability_id = v.id and  av.asset_id = a.id
     union
     select 'attacker' from_objt, a.name from_name, 'threat' to_objt, t.name to_name from threat_attacker ta, threat t, attacker a, environment_attacker ea, environment_threat et where ta.environment_id = environmentId and ta.attacker_id = a.id and ta.threat_id = t.id and ta.environment_id = ea.environment_id and ta.environment_id = et.environment_id and ea.environment_id = environmentId and et.environment_id = environmentId
@@ -5237,23 +5361,21 @@ begin
     union
     select 'vulnerability' from_objt, v.name from_name, 'risk' to_objt, r.name to_name from risk r, vulnerability v, vulnerability_severity vs, environment_threat et where r.vulnerability_id = v.id and v.id = vs.vulnerability_id and vs.environment_id = environmentId and r.threat_id = et.threat_id and et.environment_id = environmentId
     union
-    select 'risk' from_objt, ri.name from_name, 'response' to_objt, re.name to_name from response re, risk ri,environment_response er where er.environment_id = environmentId and er.response_id = re.id and re.risk_id = ri.id
+    select 'risk' from_objt, ri.name from_name, 'response' to_objt, re.name to_name from response re, risk ri,environment_response er, environment_risk eri where eri.environment_id = environmentId and eri.environment_id = er.environment_id and eri.id = re.risk_id and er.response_id = re.id and re.risk_id = ri.id
     union
     select 'countermeasure' from_objt, c.name from_name, 'role' from_objt, r.name to_name from countermeasure_role cr, countermeasure c, role r where cr.environment_id = environmentId and cr.countermeasure_id = c.id and cr.role_id = r.id
     union
-    select 'task' from_objt, t.name from_name, 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name from task t, requirement r, environment_task et,requirement_task tr, asset_requirement rmr, asset rm where et.environment_id = environmentId and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'task' from_objt, t.name from_name, 'requirement' from_objt, r.name from_name from task t, requirement r, environment_task et,requirement_task tr, asset_requirement rmr, asset rm where et.environment_id = environmentId and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'task' from_objt, t.name from_name, 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name from task t, requirement r, environment_task et,requirement_task tr, environment_requirement rmr, environment rm where et.environment_id = environmentId and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select 'task' from_objt, t.name from_name, 'requirement' from_objt, r.name from_name from task t, requirement r, environment_task et,requirement_task tr, environment_requirement rmr, environment rm where et.environment_id = environmentId and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    union 
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id 
     union
-    select 'risk' from_objt, r.name from_name, 'misusecase' to_objt, m.name to_name from risk r, misusecase m, misusecase_risk mr, environment_misusecase em where em.environment_id = environmentId and em.misusecase_id = mr.misusecase_id and mr.misusecase_id = m.id and mr.risk_id = r.id
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id 
     union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id 
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id 
     union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id 
-    union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id 
-    union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id 
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id 
     union
     select 'task' from_objt, t.name from_name, 'asset' to_objt, a.name to_name from task_asset ta, environment_asset ea, environment_task et, asset a, task t where ea.environment_id = environmentId and et.environment_id = environmentId and et.task_id = ta.task_id and ta.task_id = t.id and ea.asset_id = ta.asset_id and ta.asset_id = a.id
     union
@@ -5261,9 +5383,9 @@ begin
     union
     select 'role' from_objt, ro.name from_name, 'response' to_objt, re.name to_name from responserole_goalassociation rr, response re, role ro where rr.environment_id = environmentId and rr.goal_id = re.id and rr.subgoal_id = ro.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,asset_requirement rmr,asset rm where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement' from_objt, r.name from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,asset_requirement rmr,asset rm where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,environment_requirement rmr,environment rm where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id 
+    select 'requirement' from_objt, r.name from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,environment_requirement rmr,environment rm where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id 
     union 
     select 'countermeasure' from_objt, c.name from_name, 'asset' to_objt, a.name to_name from countermeasure c, asset a, environment_countermeasure cc, countermeasure_asset ca where cc.environment_id = environmentId and cc.countermeasure_id = ca.countermeasure_id and ca.countermeasure_id = c.id and ca.asset_id = a.id
     union
@@ -5271,21 +5393,21 @@ begin
     union
     select 'countermeasure' from_objt, c.name from_name, 'asset' to_objt, a.name to_name from countermeasure c, asset a, environment_countermeasure cc, countermeasure_securitypattern csp, securitypattern_asset_template_asset ata, securitypattern_classassociation sc where cc.environment_id = environmentId and cc.countermeasure_id = csp.countermeasure_id and  csp.pattern_id = sc.pattern_id and csp.pattern_id = ata.pattern_id and sc.tail_id = ata.template_asset_id and ata.asset_id = a.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'vulnerability' to_objt, v.name to_name from requirement r, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv,asset rm, asset_requirement rmr where cv.environment_id = environmentId and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name from requirement r, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv,asset rm, asset_requirement rmr where cv.environment_id = environmentId and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'vulnerability' to_objt, v.name to_name from requirement r, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv,environment rm, environment_requirement rmr where cv.environment_id = environmentId and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = rmr.requirement_id and rmr.environment_id = rm.id 
+    select 'requirement' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name from requirement r, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv,environment rm, environment_requirement rmr where cv.environment_id = environmentId and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = rmr.requirement_id and rmr.environment_id = rm.id 
     union
     select 'countermeasure' from_objt, c.name from_name, 'task' to_objt, t.name to_name from countermeasure c, task t, countermeasuretask_goalassociation ct where ct.goal_id = c.id and ct.subgoal_id = t.id and ct.environment_id = environmentId
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',re.label) from_name, 'role' to_objt, ro.name to_name from requirement re, role ro, requirementrole_goalassociation rr,asset_requirement rmr, asset rm where rr.goal_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and rr.subgoal_id = ro.id and rr.environment_id = environmentId and re.id = rmr.requirement_id and rmr.asset_id = rm.id 
+    select 'requirement' from_objt, re.name from_name, 'role' to_objt, ro.name to_name from requirement re, role ro, requirementrole_goalassociation rr,asset_requirement rmr, asset rm where rr.goal_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and rr.subgoal_id = ro.id and rr.environment_id = environmentId and re.id = rmr.requirement_id and rmr.asset_id = rm.id 
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',re.label) from_name, 'role' to_objt, ro.name to_name from requirement re, role ro, requirementrole_goalassociation rr,environment_requirement rmr, environment rm where rr.goal_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and rr.subgoal_id = ro.id and rr.environment_id = environmentId and re.id = rmr.requirement_id and rmr.environment_id = rm.id 
+    select 'requirement' from_objt, re.name from_name, 'role' to_objt, ro.name to_name from requirement re, role ro, requirementrole_goalassociation rr,environment_requirement rmr, environment rm where rr.goal_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and rr.subgoal_id = ro.id and rr.environment_id = environmentId and re.id = rmr.requirement_id and rmr.environment_id = rm.id 
     union
     select 'obstacle' from_objt, o.name from_name, 'threat' to_objt, t.name to_name from obstacle o, threat t, obstaclethreat_goalassociation ot, environment_threat et where ot.goal_id = o.id and ot.subgoal_id = t.id and ot.subgoal_id = et.threat_id and et.environment_id = environmentId and et.environment_id = ot.environment_id
     union
     select 'obstacle' from_objt, o.name from_name, 'vulnerability' to_objt, v.name to_name from obstacle o, vulnerability v, obstaclevulnerability_goalassociation ov, environment_vulnerability ev where ov.goal_id = o.id and ov.subgoal_id = v.id and ov.subgoal_id = ev.vulnerability_id and ev.environment_id = environmentId and ev.environment_id = ov.environment_id
     union
-    select 'asset' from_objt, a.name from_name, 'requirement' to_objt, concat(a.short_code,'-',r.label) to_name from asset a, environment_asset ea, requirement r, asset_requirement ar where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id)
+    select 'asset' from_objt, a.name from_name, 'requirement' to_objt, r.name to_name from asset a, environment_asset ea, requirement r, asset_requirement ar where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id)
     union
     select 'domainproperty' from_objt, d.name from_name, 'asset' to_objt, a.name to_name from asset a, environment_asset ea, domainproperty_asset da, domainproperty d where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = da.asset_id and da.domainproperty_id = d.id
     union
@@ -5295,11 +5417,13 @@ begin
     union
     select 'asset' from_objt, a.name from_name, 'component' to_objt, c.name to_name from component c, component_vulnerability_target cvt, asset a where cvt.environment_id = environmentId and cvt.component_id = c.id and cvt.asset_id = a.id
     union
-    select 'asset' from_objt, a.name from_name, 'component' to_objt, c.name to_name from component c, component_threat_target ctt, asset a where ctt.environment_id = environmentId and ctt.component_id = c.id and ctt.asset_id = a.id;
+    select 'asset' from_objt, a.name from_name, 'component' to_objt, c.name to_name from component c, component_threat_target ctt, asset a where ctt.environment_id = environmentId and ctt.component_id = c.id and ctt.asset_id = a.id
+    union
+    select 'risk' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name from risk r, vulnerability v, environment_risk er, environment_vulnerability ev, risk_vulnerability rv where er.environment_id = environmentId and er.id = rv.risk_id and rv.risk_id = r.id and ev.environment_id = environmentId and ev.vulnerability_id = rv.vulnerability_id and rv.vulnerability_id = v.id
+    union
+    select 'risk' from_objt, r.name from_name, 'threat' to_objt, t.name to_name from risk_threat rt, environment_risk er, environment_threat et, risk r, threat t where er.environment_id = environmentId and et.environment_id = environmentId and er.id = rt.risk_id and rt.risk_id = r.id and et.threat_id = rt.threat_id and rt.threat_id = t.id;
   else
     select 'asset' from_objt,a.name from_name, 'threat' to_objt,t.name to_name from asset_threat at,asset a, threat t where at.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.asset_id = a.id and at.threat_id = t.id
-    union
-    select 'asset' from_objt,a.name from_name, 'tag' to_objt,t.name to_name from asset_tag at,asset a, tag t, environment_asset ea where ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ea.asset_id = a.id and at.asset_id = ea.asset_id and at.tag_id = t.id
     union
     select 'asset' from_objt,a.name from_name,'vulnerability' to_objt, v.name to_name from asset_vulnerability av, asset a, vulnerability v where av.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.vulnerability_id = v.id and  av.asset_id = a.id
     union
@@ -5311,23 +5435,21 @@ begin
     union
     select 'vulnerability' from_objt, v.name from_name, 'risk' to_objt, r.name to_name from risk r, vulnerability v, vulnerability_severity vs, environment_threat et where r.vulnerability_id = v.id and v.id = vs.vulnerability_id and vs.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and r.threat_id = et.threat_id and et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select 'risk' from_objt, ri.name from_name, 'response' to_objt, re.name to_name from response re, risk ri,environment_response er where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and er.response_id = re.id and re.risk_id = ri.id
+    select 'risk' from_objt, ri.name from_name, 'response' to_objt, re.name to_name from response re, risk ri,environment_response er, environment_risk eri where eri.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eri.environment_id = er.environment_id and eri.id = re.risk_id and er.response_id = re.id and re.risk_id = ri.id
     union
     select 'countermeasure' from_objt, c.name from_name, 'role' from_objt, r.name to_name from countermeasure_role cr, countermeasure c, role r where cr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and cr.countermeasure_id = c.id and cr.role_id = r.id
     union
-    select 'task' from_objt, t.name from_name, 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name from task t, requirement r, environment_task et,requirement_task tr, asset_requirement rmr, asset rm where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'task' from_objt, t.name from_name, 'requirement' from_objt, r.name from_name from task t, requirement r, environment_task et,requirement_task tr, asset_requirement rmr, asset rm where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'task' from_objt, t.name from_name, 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name from task t, requirement r, environment_task et,requirement_task tr, environment_requirement rmr, environment rm where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select 'task' from_objt, t.name from_name, 'requirement' from_objt, r.name from_name from task t, requirement r, environment_task et,requirement_task tr, environment_requirement rmr, environment rm where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.task_id = t.id and et.task_id = tr.task_id and tr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    union 
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id 
     union
-    select 'risk' from_objt, r.name from_name, 'misusecase' to_objt, m.name to_name from risk r, misusecase m, misusecase_risk mr, environment_misusecase em where em.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and em.misusecase_id = mr.misusecase_id and mr.misusecase_id = m.id and mr.risk_id = r.id
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id 
     union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id 
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id 
     union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id 
-    union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id 
-    union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id 
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id 
     union
     select 'task' from_objt, t.name from_name, 'asset' to_objt, a.name to_name from task_asset ta, environment_asset ea, environment_task et, asset a, task t where ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.task_id = ta.task_id and ta.task_id = t.id and ea.asset_id = ta.asset_id and ta.asset_id = a.id
     union
@@ -5335,9 +5457,9 @@ begin
     union
     select 'role' from_objt, ro.name from_name, 'response' to_objt, re.name to_name from responserole_goalassociation rr, response re, role ro where rr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rr.goal_id = re.id and rr.subgoal_id = ro.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc, asset_requirement rmr,asset rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement' from_objt, r.name from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc, asset_requirement rmr,asset rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc, environment_requirement rmr,environment rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select 'requirement' from_objt, r.name from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc, environment_requirement rmr,environment rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
     select 'countermeasure' from_objt, c.name from_name, 'asset' to_objt, a.name to_name from countermeasure c, asset a, environment_countermeasure cc, countermeasure_asset ca where cc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and cc.countermeasure_id = ca.countermeasure_id and ca.countermeasure_id = c.id and ca.asset_id = a.id
     union
@@ -5345,19 +5467,19 @@ begin
     union
     select 'countermeasure' from_objt, c.name from_name, 'asset' to_objt, a.name to_name from countermeasure c, asset a, environment_countermeasure cc, countermeasure_securitypattern csp, securitypattern_asset_template_asset ata, securitypattern_classassociation sc where cc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and cc.countermeasure_id = csp.countermeasure_id and  csp.pattern_id = sc.pattern_id and csp.pattern_id = ata.pattern_id and sc.tail_id = ata.template_asset_id and ata.asset_id = a.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'vulnerability' to_objt, v.name to_name from requirement r, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv,asset_requirement rmr, asset rm where cv.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name from requirement r, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv,asset_requirement rmr, asset rm where cv.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
     select 'countermeasure' from_objt, c.name from_name, 'task' to_objt, t.name to_name from countermeasure c, task t, countermeasuretask_goalassociation ct where ct.goal_id = c.id and ct.subgoal_id = t.id and ct.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',re.label) from_name, 'role' to_objt, ro.name to_name from requirement re, role ro, requirementrole_goalassociation rr, asset_requirement rmr,asset rm where rr.goal_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and rr.subgoal_id = ro.id and rr.environment_id in (select environment_id from composite_environment where composite_environment_id  = environment_id) and re.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement' from_objt, re.name from_name, 'role' to_objt, ro.name to_name from requirement re, role ro, requirementrole_goalassociation rr, asset_requirement rmr,asset rm where rr.goal_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and rr.subgoal_id = ro.id and rr.environment_id in (select environment_id from composite_environment where composite_environment_id  = environment_id) and re.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',re.label) from_name, 'role' to_objt, ro.name to_name from requirement re, role ro, requirementrole_goalassociation rr, environment_requirement rmr,environment rm where rr.goal_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and rr.subgoal_id = ro.id and rr.environment_id in (select environment_id from composite_environment where composite_environment_id  = environment_id) and re.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select 'requirement' from_objt, re.name from_name, 'role' to_objt, ro.name to_name from requirement re, role ro, requirementrole_goalassociation rr, environment_requirement rmr,environment rm where rr.goal_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and rr.subgoal_id = ro.id and rr.environment_id in (select environment_id from composite_environment where composite_environment_id  = environment_id) and re.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
     select 'obstacle' from_objt, o.name from_name, 'threat' to_objt, t.name to_name from obstacle o, threat t, obstaclethreat_goalassociation ot, environment_threat et where ot.goal_id = o.id and ot.subgoal_id = t.id and ot.subgoal_id = et.threat_id and et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.environment_id = ot.environment_id
     union
     select 'obstacle' from_objt, o.name from_name, 'vulnerability' to_objt, v.name to_name from obstacle o, vulnerability v, obstaclevulnerability_goalassociation ov, environment_vulnerability ev where ov.goal_id = o.id and ov.subgoal_id = v.id and ov.subgoal_id = ev.vulnerability_id and ev.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ev.environment_id = ov.environment_id
     union
-    select 'asset' from_objt, a.name from_name, 'requirement' to_objt, concat(a.short_code,'-',r.label) to_name from asset a, environment_asset ea, requirement r, asset_requirement ar where ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id)
+    select 'asset' from_objt, a.name from_name, 'requirement' to_objt, r.name to_name from asset a, environment_asset ea, requirement r, asset_requirement ar where ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id)
     union
     select 'domainproperty' from_objt, d.name from_name, 'asset' to_objt, a.name to_name from asset a, environment_asset ea, domainproperty_asset da, domainproperty d where ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ea.asset_id = a.id and a.id = da.asset_id and da.domainproperty_id = d.id
     union
@@ -5367,8 +5489,11 @@ begin
     union
     select 'asset' from_objt, a.name from_name, 'component' to_objt, c.name to_name from component c, component_vulnerability_target cvt, asset a where cvt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and cvt.component_id = c.id and cvt.asset_id = a.id
     union
-    select 'asset' from_objt, a.name from_name, 'component' to_objt, c.name to_name from component c, component_threat_target ctt, asset a where ctt.environment_id in (select environment_id from composite_environment_id where composite_environment_id = environmentId) and ctt.component_id = c.id and ctt.asset_id = a.id;
-
+    select 'asset' from_objt, a.name from_name, 'component' to_objt, c.name to_name from component c, component_threat_target ctt, asset a where ctt.environment_id in (select environment_id from composite_environment_id where composite_environment_id = environmentId) and ctt.component_id = c.id and ctt.asset_id = a.id
+    union
+    select 'risk' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name from risk r, vulnerability v, environment_risk er, environment_vulnerability ev, risk_vulnerability rv where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and er.id = rv.risk_id and rv.risk_id = r.id and ev.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ev.vulnerability_id = rv.vulnerability_id and rv.vulnerability_id = v.id
+    union
+    select 'risk' from_objt, r.name from_name, 'threat' to_objt, t.name to_name from risk_threat rt, environment_risk er, environment_threat et, risk r, threat t where er.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.id = rt.risk_id and rt.risk_id = r.id and et.threat_id = rt.threat_id and rt.threat_id = t.id;
   end if;
 end
 //
@@ -5798,13 +5923,13 @@ begin
     union
     select -1,he.name,ha.name,'asset',a.head_navigation,hat.name,hm.name,a.head_role_name,a.tail_role_name,tm.name,tat.name,a.tail_navigation,'asset',ta.name,concat('Concerns Component ',c.name) rationale from component_classassociation a, environment he, environment te, asset ha, template_asset hta, multiplicity_type hm, association_type hat, association_type tat, multiplicity_type tm, asset ta, template_asset tta, environment_asset hea, environment_asset tea, component_asset_template_asset hata, component_asset_template_asset tata,component c where hea.environment_id = environmentId and hea.environment_id = tea.environment_id and hea.environment_id = he.id and tea.environment_id = te.id and hea.asset_id = ha.id and tea.asset_id = ta.id and a.head_id = hta.id and a.head_multiplicity_id = hm.id and a.head_association_type_id = hat.id and a.tail_association_type_id = tat.id and a.tail_multiplicity_id = tm.id and a.tail_id = tta.id and ha.id = hata.asset_id and hata.template_asset_id = hta.id and hata.component_id = c.id and ta.id = tata.asset_id and tata.template_asset_id = tta.id and tata.component_id = c.id and a.component_id = c.id
     union
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,concat('Safeguards ',ma.name) rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at where ma.id = ca.asset_id and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id = environmentId and at.environment_id = environmentId and at.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,concat('Safeguards ',ma.name) rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at, environment_asset ea where ma.id = ca.asset_id and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id = environmentId and at.environment_id = environmentId and at.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id = environmentId
     union
     select -1,e.name,va.name,'asset',1,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,concat('Safeguards ',ma.name) rationale from asset ma, asset va, environment e, component_vulnerability_target cvt, asset_vulnerability av where ma.id = cvt.asset_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id = environmentId and av.environment_id = e.id
     union
     select -1,e.name,va.name,'asset',1,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,concat('Safeguards ',ma.name) rationale from asset ma, asset va, environment e, component_threat_target ctt, asset_threat at where ma.id = ctt.asset_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id = environmentId and at.environment_id = environmentId and at.environment_id = e.id
     union
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,concat('Safeguards ',ma.name) rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av where ma.id = ca.asset_id and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id = environmentId and av.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,concat('Safeguards ',ma.name) rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av, environment_asset ea where ma.id = ca.asset_id and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id = environmentId and av.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id = environmentId
     union
     select -1,e.name,p.name,'persona',0,'Association','1','','','1','Association',0,'asset', a.name,concat('Concerns task ',t.name) rationale from persona p, asset a, environment e, task_asset ta, task_persona tp, task t where p.id = tp.persona_id and tp.environment_id = environmentId and tp.task_id = ta.task_id and ta.environment_id = tp.environment_id and ta.asset_id = a.id and ta.environment_id = e.id and ta.task_id = t.id
     union
@@ -5824,9 +5949,9 @@ begin
     union
     select -1,he.name,ha.name,'asset',0,hat.name,hm.name,a.head_role_name,a.tail_role_name,tm.name,tat.name,0,'asset',ta.name,'' rationale from securitypattern_classassociation a, environment he, environment te, asset ha, template_asset hta, multiplicity_type hm, association_type hat, association_type tat, multiplicity_type tm, asset ta, template_asset tta, environment_asset hea, environment_asset tea, securitypattern_asset_template_asset hata, securitypattern_asset_template_asset tata where hea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hea.environment_id = tea.environment_id and hea.environment_id = he.id and tea.environment_id = te.id and hea.asset_id = ha.id and tea.asset_id = ta.id and a.head_id = hta.id and a.head_multiplicity_id = hm.id and a.head_association_type_id = hat.id and a.tail_association_type_id = tat.id and a.tail_multiplicity_id = tm.id and a.tail_id = tta.id and ha.id = hata.asset_id and hata.template_asset_id = hta.id and hata.pattern_id = a.pattern_id and ta.id = tata.asset_id and tata.template_asset_id = tta.id and tata.pattern_id = a.pattern_id
     union
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at where ma.id = ca.asset_id and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at, environment_asset ea where ma.id = ca.asset_id and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union 
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av where ma.id = ca.asset_id and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av, environment_asset ea where ma.id = ca.asset_id and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
     select -1,e.name,p.name,'persona',0,'Association','1','','','1','Association',0,'asset',a.name,'' rationale from persona p, asset a, environment e, task_asset ta, task_persona tp where p.id = tp.persona_id and tp.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and tp.task_id = ta.task_id and ta.environment_id = tp.environment_id and ta.asset_id = a.id and ta.environment_id = e.id
     union
@@ -5864,9 +5989,9 @@ begin
     union
     select -1,he.name,ha.name,'asset',0,hat.name,hm.name,a.head_role_name,a.tail_role_name,tm.name,tat.name,0,'asset',ta.name,'' rationale from securitypattern_classassociation a, environment he, environment te, asset ha, template_asset hta, multiplicity_type hm, association_type hat, association_type tat, multiplicity_type tm, asset ta, template_asset tta, environment_asset hea, environment_asset tea, securitypattern_asset_template_asset hata, securitypattern_asset_template_asset tata,securitypattern sp where hea.environment_id = environmentId and hea.environment_id = tea.environment_id and hea.environment_id = he.id and tea.environment_id = te.id and hea.asset_id = ha.id and tea.asset_id = ta.id and a.head_id = hta.id and a.head_multiplicity_id = hm.id and a.head_association_type_id = hat.id and a.tail_association_type_id = tat.id and a.tail_multiplicity_id = tm.id and a.tail_id = tta.id and ha.id = hata.asset_id and hata.template_asset_id = hta.id and hata.pattern_id = sp.id and ta.id = tata.asset_id and tata.template_asset_id = tta.id and tata.pattern_id = sp.id and a.pattern_id = sp.id
     union
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at where ma.id = ca.asset_id and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id = environmentId and at.environment_id = environmentId and at.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at, environment_asset ea where ma.id = ca.asset_id and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id = environmentId and at.environment_id = environmentId and at.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id = environmentId
     union 
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av where ma.id = ca.asset_id and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id = environmentId and av.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av, environment_asset ea where ma.id = ca.asset_id and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id = environmentId and av.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id = environmentId
     union
     select -1,e.name,va.name,'asset',1,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, component_vulnerability_target cvt, asset_vulnerability av where ma.id = cvt.asset_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id = environmentId and av.environment_id = e.id
     union
@@ -5884,9 +6009,9 @@ begin
     union
     select -1,he.name,ha.name,'asset',0,hat.name,hm.name,a.head_role_name,a.tail_role_name,tm.name,tat.name,0,'asset',ta.name,'' rationale from securitypattern_classassociation a, environment he, environment te, asset ha, template_asset hta, multiplicity_type hm, association_type hat, association_type tat, multiplicity_type tm, asset ta, template_asset tta, environment_asset hea, environment_asset tea, securitypattern_asset_template_asset hata, securitypattern_asset_template_asset tata where hea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hea.environment_id = tea.environment_id and hea.environment_id = he.id and tea.environment_id = te.id and hea.asset_id = ha.id and tea.asset_id = ta.id and a.head_id = hta.id and a.head_multiplicity_id = hm.id and a.head_association_type_id = hat.id and a.tail_association_type_id = tat.id and a.tail_multiplicity_id = tm.id and a.tail_id = tta.id and ha.id = hata.asset_id and hata.template_asset_id = hta.id and hata.pattern_id = a.pattern_id and ta.id = tata.asset_id and tata.template_asset_id = tta.id and tata.pattern_id = a.pattern_id
     union
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at where ma.id = ca.asset_id and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at, environment_asset ea where ma.id = ca.asset_id and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union 
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av where ma.id = ca.asset_id and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av, environment_asset ea where ma.id = ca.asset_id and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
     select -1,e.name,p.name,'persona',0,'Association','1','','','1','Association',0,'asset',a.name,'' rationale from persona p, asset a, environment e, task_asset ta, task_persona tp where p.id = tp.persona_id and tp.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and tp.task_id = ta.task_id and ta.environment_id = tp.environment_id and ta.asset_id = a.id and ta.environment_id = e.id
     union
@@ -6377,7 +6502,9 @@ begin
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name, 'task' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclegoal_goalassociation ga, environment e, obstacle hg, reference_type rt, task tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id;
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id
+    union
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name, 'domainproperty' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacledomainproperty_goalassociation ga, environment e, obstacle hg, reference_type rt, domainproperty tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id;
   else
     select id into environmentId from environment where name = environmentName limit 1;
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalgoal_goalassociation ga, environment e, goal hg, reference_type rt, goal tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
@@ -6410,7 +6537,9 @@ begin
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name, 'task' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclegoal_goalassociation ga, environment e, obstacle hg, reference_type rt, task tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id;
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id
+    union
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name, 'domainproperty' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacledomainproperty_goalassociation ga, environment e, obstacle hg, reference_type rt, domainproperty tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId;
   end if;
 end
 //
@@ -6724,10 +6853,12 @@ begin
   elseif goalName = 'obstacle' and subGoalName = 'misusecase'
   then
     delete from obstaclemisusecase_goalassociation where id = associationId;
+  elseif goalName = 'obstacle' and subGoalName = 'domainproperty'
+  then
+    delete from obstacledomainproperty_goalassociation where id = associationId;
   else
     delete from requirementrole_goalassociation where id = associationId;
   end if;
-
 end
 //
 
@@ -6876,11 +7007,11 @@ begin
   then
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalgoal_goalassociation ga, environment e, goal hg, reference_type rt, goal tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'task' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goaltask_goalassociation ga, environment e, goal hg, reference_type rt, task tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
@@ -6890,15 +7021,15 @@ begin
     union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'usecase' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalusecase_goalassociation ga, environment e, goal hg, reference_type rt, usecase tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementgoal_goalassociation ga, environment e, requirement hg, reference_type rt, goal tg, asset_requirement rmr, asset rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementgoal_goalassociation ga, environment e, requirement hg, reference_type rt, goal tg, asset_requirement rmr, asset rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementgoal_goalassociation ga, environment e, requirement hg, reference_type rt, goal tg, environment_requirement rmr, environment rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = rmr.requirement_id and rmr.environment_id = e.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementgoal_goalassociation ga, environment e, requirement hg, reference_type rt, goal tg, environment_requirement rmr, environment rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = rmr.requirement_id and rmr.environment_id = e.id
     union
-    select ga.id id,e.name environment,concat(hrm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,concat(trm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrequirement_goalassociation ga, environment e, requirement hg, reference_type rt, requirement tg, asset_requirement hrmr, asset hrm, asset_requirement trmr, asset trm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and hg.id = hrmr.requirement_id and hrmr.asset_id = hrm.id and tg.id = trmr.requirement_id and trmr.asset_id = trm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrequirement_goalassociation ga, environment e, requirement hg, reference_type rt, requirement tg, asset_requirement hrmr, asset hrm, asset_requirement trmr, asset trm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and hg.id = hrmr.requirement_id and hrmr.asset_id = hrm.id and tg.id = trmr.requirement_id and trmr.asset_id = trm.id
     union
-    select ga.id id,e.name environment,concat(he.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,concat(te.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrequirement_goalassociation ga, environment e, requirement hg, reference_type rt, requirement tg, environment_requirement her, environment  he, environment_requirement ter, environment te where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and hg.id = her.requirement_id and her.environment_id = he.id and tg.id = ter.requirement_id and ter.environment_id = te.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrequirement_goalassociation ga, environment e, requirement hg, reference_type rt, requirement tg, environment_requirement her, environment  he, environment_requirement ter, environment te where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and hg.id = her.requirement_id and her.environment_id = he.id and tg.id = ter.requirement_id and ter.environment_id = te.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrole_goalassociation ga, environment e, goal hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
@@ -6906,9 +7037,9 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'response' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from responserole_goalassociation ga, environment e, response hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select -1 id,e.name environment, concat(rm.short_code,'-',r.label) goal_name, 'requirement' goal_dim,'and' ref_type,c.name subgoal_name,'countermeasure' subgoal_dim,0 alternative_id,'' rationale from requirement_countermeasure rc, environment e, requirement r, countermeasure c, asset_requirement rmr, asset rm where rc.environment_id = environmentId and rc.environment_id = e.id and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,'and' ref_type,c.name subgoal_name,'countermeasure' subgoal_dim,0 alternative_id,'' rationale from requirement_countermeasure rc, environment e, requirement r, countermeasure c, asset_requirement rmr, asset rm where rc.environment_id = environmentId and rc.environment_id = e.id and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select -1 id,e.name environment, concat(rm.short_code,'-',r.label) goal_name, 'requirement' goal_dim,'and' ref_type,c.name subgoal_name,'countermeasure' subgoal_dim,0 alternative_id,'' rationale from requirement_countermeasure rc, environment e, requirement r, countermeasure c, environment_requirement rmr, environment rm where rc.environment_id = environmentId and rc.environment_id = e.id and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,'and' ref_type,c.name subgoal_name,'countermeasure' subgoal_dim,0 alternative_id,'' rationale from requirement_countermeasure rc, environment e, requirement r, countermeasure c, environment_requirement rmr, environment rm where rc.environment_id = environmentId and rc.environment_id = e.id and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
     select -1 id,e.name environment,t.name goal_name,'task' goal_dim,'conflict' ref_type,c.name subgoal_name,'countermeasure' subgoal_dim,0 alternative_id,concat('usability disconnect in countermeasure ',c.name) rationale from environment e, countermeasure_task_persona ctp, task t, countermeasure c where ctp.environment_id = e.id and ctp.task_id = t.id and ctp.countermeasure_id = c.id and ctp.environment_id = environmentId and (ctp.duration_id > 0 or ctp.frequency_id > 0 or ctp.demands_id > 0 or ctp.goalsupport_id > 0)
     union
@@ -6922,19 +7053,19 @@ begin
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclegoal_goalassociation ga, environment e, obstacle hg, reference_type rt, goal tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId
     union
-    select -1 id,e.name environment, concat(a.short_code,'-',r.label) goal_name, 'requirement' goal_dim,ret.name ref_type,t.name subgoal_name,'task' subgoal_dim,0 alternative_id,'' rationale from requirement_task rt, environment e, environment_task et, environment_asset ea, requirement r, task t, asset_requirement ar, asset a, reference_type ret where et.environment_id = environmentId and et.environment_id = e.id and et.task_id = t.id and et.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id and rt.ref_type_id = ret.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,ret.name ref_type,t.name subgoal_name,'task' subgoal_dim,0 alternative_id,'' rationale from requirement_task rt, environment e, environment_task et, environment_asset ea, requirement r, task t, asset_requirement ar, asset a, reference_type ret where et.environment_id = environmentId and et.environment_id = e.id and et.task_id = t.id and et.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id and rt.ref_type_id = ret.id
     union
-    select -1 id,e.name environment, concat(e.short_code,'-',r.label) goal_name, 'requirement' goal_dim,ret.name ref_type,t.name subgoal_name,'task' subgoal_dim,0 alternative_id,'' rationale from requirement_task rt, environment e, environment_task et, requirement r, task t, environment_requirement er, reference_type ret where et.environment_id = environmentId and et.environment_id = e.id and et.task_id = t.id and et.environment_id = er.environment_id and er.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id and rt.ref_type_id = ret.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,ret.name ref_type,t.name subgoal_name,'task' subgoal_dim,0 alternative_id,'' rationale from requirement_task rt, environment e, environment_task et, requirement r, task t, environment_requirement er, reference_type ret where et.environment_id = environmentId and et.environment_id = e.id and et.task_id = t.id and et.environment_id = er.environment_id and er.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id and rt.ref_type_id = ret.id
     union
-    select -1 id,e.name environment, concat(a.short_code,'-',r.label) goal_name, 'requirement' goal_dim,ret.name ref_type,u.name subgoal_name,'usecase' subgoal_dim,0 alternative_id,'' rationale from requirement_usecase ru, environment e, environment_usecase eu, environment_asset ea, requirement r, usecase u, asset_requirement ar, asset a, reference_type ret where eu.environment_id = environmentId and eu.environment_id = e.id and eu.usecase_id = u.id and eu.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ru.requirement_id and ru.usecase_id = u.id and ru.ref_type_id = ret.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,ret.name ref_type,u.name subgoal_name,'usecase' subgoal_dim,0 alternative_id,'' rationale from requirement_usecase ru, environment e, environment_usecase eu, environment_asset ea, requirement r, usecase u, asset_requirement ar, asset a, reference_type ret where eu.environment_id = environmentId and eu.environment_id = e.id and eu.usecase_id = u.id and eu.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ru.requirement_id and ru.usecase_id = u.id and ru.ref_type_id = ret.id
     union
-    select -1 id,e.name environment, concat(e.short_code,'-',r.label) goal_name, 'requirement' goal_dim,ret.name ref_type,u.name subgoal_name,'usecase' subgoal_dim,0 alternative_id,'' rationale from requirement_usecase ru, environment e, environment_usecase eu, requirement r, usecase u, environment_requirement er, reference_type ret where eu.environment_id = environmentId and eu.environment_id = e.id and eu.usecase_id = u.id and eu.environment_id = er.environment_id and er.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ru.requirement_id and ru.usecase_id = u.id and ru.ref_type_id = ret.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,ret.name ref_type,u.name subgoal_name,'usecase' subgoal_dim,0 alternative_id,'' rationale from requirement_usecase ru, environment e, environment_usecase eu, requirement r, usecase u, environment_requirement er, reference_type ret where eu.environment_id = environmentId and eu.environment_id = e.id and eu.usecase_id = u.id and eu.environment_id = er.environment_id and er.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ru.requirement_id and ru.usecase_id = u.id and ru.ref_type_id = ret.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacleobstacle_goalassociation ga, environment e, obstacle hg, reference_type rt, obstacle tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, asset_requirement rmr, asset rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, asset_requirement rmr, asset rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, environment_requirement rmr, environment rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId and hg.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, environment_requirement rmr, environment rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId and hg.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclegoal_goalassociation ga, environment e, obstacle hg, reference_type rt, goal tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId
     union
@@ -6946,19 +7077,17 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'goal' goal_dim,'and' ref_type,tg.name subgoal_name, 'goal' subgoal_dim,'0' alternative_id, 'None' rationale from goal tg, response_goal trg, reaction_detection_mechanism rdm, countermeasure_asset ca, countermeasure_vulnerability_response_target ctrt, response_goal hrg, goal hg, environment_goal eg, environment e where eg.environment_id = environmentId and eg.environment_id = e.id and hg.id = hrg.goal_id and hrg.response_id = rdm.response_id and rdm.environment_id = eg.environment_id and rdm.asset_id = ca.asset_id and ca.countermeasure_id = ctrt.countermeasure_id and ctrt.environment_id = eg.environment_id and ctrt.response_id = trg.response_id and trg.goal_id = tg.id and tg.id = eg.goal_id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId;
-/*    union
-    select -1 id,environmentName environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId
     union
-    select -1 id,environmentName environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id; */
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'domainproperty' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacledomainproperty_goalassociation ga, environment e, obstacle hg, reference_type rt, domainproperty tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId;
   else
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalgoal_goalassociation ga, environment e, goal hg, reference_type rt, goal tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
     union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'task' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goaltask_goalassociation ga, environment e, goal hg, reference_type rt, task tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
@@ -6968,17 +7097,17 @@ begin
     union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'usecase' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalusecase_goalassociation ga, environment e, goal hg, reference_type rt, usecase tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id  = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id, ga.rationale from requirementgoal_goalassociation ga, environment e, requirement hg, reference_type rt, goal tg, asset_requirement rmr, asset rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id, ga.rationale from requirementgoal_goalassociation ga, environment e, requirement hg, reference_type rt, goal tg, asset_requirement rmr, asset rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id, ga.rationale from requirementgoal_goalassociation ga, environment e, requirement hg, reference_type rt, goal tg, environment_requirement rmr, environment rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id, ga.rationale from requirementgoal_goalassociation ga, environment e, requirement hg, reference_type rt, goal tg, environment_requirement rmr, environment rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
-    select ga.id id,e.name environment,concat(hrm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,concat(trm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id, ga.rationale from requirementrequirement_goalassociation ga, environment e, requirement hg, reference_type rt, requirement tg, asset_requirement hrmr, asset hrm, asset_requirement trmr, asset trm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and hg.id = hrmr.requirement_id and hrmr.asset_id = hrm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id, ga.rationale from requirementrequirement_goalassociation ga, environment e, requirement hg, reference_type rt, requirement tg, asset_requirement hrmr, asset hrm, asset_requirement trmr, asset trm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and hg.id = hrmr.requirement_id and hrmr.asset_id = hrm.id
     union
-    select ga.id id,e.name environment,concat(hrm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,concat(trm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id, ga.rationale from requirementrequirement_goalassociation ga, environment e, requirement hg, reference_type rt, requirement tg, environment_requirement hrmr, environment hrm, environment_requirement trmr, environment trm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and hg.id = hrmr.requirement_id and hrmr.environment_id = hrm.id and tg.id and trmr.requirement_id and trmr.environment_id = trm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id, ga.rationale from requirementrequirement_goalassociation ga, environment e, requirement hg, reference_type rt, requirement tg, environment_requirement hrmr, environment hrm, environment_requirement trmr, environment trm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and hg.id = hrmr.requirement_id and hrmr.environment_id = hrm.id and tg.id and trmr.requirement_id and trmr.environment_id = trm.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id, ga.rationale from goalrole_goalassociation ga, environment e, goal hg, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
@@ -6986,9 +7115,9 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'response' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from responserole_goalassociation ga, environment e, response hg, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select -1 id,e.name environment, concat(rm.short_code,'-',r.label) goal_name, 'requirement' goal_dim,'and' ref_type,c.name subgoal_name,'countermeasure' subgoal_dim,0 alternative_id,'' rationale from requirement_countermeasure rc, environment e, requirement r, countermeasure c, asset_requirement rmr, asset rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.environment_id = e.id and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,'and' ref_type,c.name subgoal_name,'countermeasure' subgoal_dim,0 alternative_id,'' rationale from requirement_countermeasure rc, environment e, requirement r, countermeasure c, asset_requirement rmr, asset rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.environment_id = e.id and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select -1 id,e.name environment, concat(rm.short_code,'-',r.label) goal_name, 'requirement' goal_dim,'and' ref_type,c.name subgoal_name,'countermeasure' subgoal_dim,0 alternative_id,'' rationale from requirement_countermeasure rc, environment e, requirement r, countermeasure c, environment_requirement rmr, environment rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.environment_id = e.id and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,'and' ref_type,c.name subgoal_name,'countermeasure' subgoal_dim,0 alternative_id,'' rationale from requirement_countermeasure rc, environment e, requirement r, countermeasure c, environment_requirement rmr, environment rm where rc.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rc.environment_id = e.id and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
     select -1 id,e.name environment,t.name goal_name,'task' goal_dim,'conflict' ref_type,c.name subgoal_name,'countermeasure' subgoal_dim,0 alternative_id,concat('usability disconnect in countermeasure ',c.name) rationale from environment e, countermeasure_task_persona ctp, task t, countermeasure c where ctp.environment_id = e.id and ctp.task_id = t.id and ctp.countermeasure_id = c.id and ctp.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and (ctp.duration_id > 0 or ctp.frequency_id > 0 or ctp.demands_id > 0 or ctp.goalsupport_id > 0)
     union
@@ -7002,19 +7131,19 @@ begin
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclegoal_goalassociation ga, environment e, obstacle hg, reference_type rt, goal tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select -1 id,e.name environment, concat(a.short_code,'-',r.label) goal_name, 'requirement' goal_dim,ret.name ref_type,t.name subgoal_name,'task' subgoal_dim,0 alternative_id,'' rationale from requirement_task rt, environment e, environment_task et, environment_asset ea, requirement r, task t, asset_requirement ar, asset a, reference_type ret where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.environment_id = e.id and et.task_id = t.id and et.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id and rt.ref_type_id = ret.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,ret.name ref_type,t.name subgoal_name,'task' subgoal_dim,0 alternative_id,'' rationale from requirement_task rt, environment e, environment_task et, environment_asset ea, requirement r, task t, asset_requirement ar, asset a, reference_type ret where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.environment_id = e.id and et.task_id = t.id and et.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id and rt.ref_type_id = ret.id
     union
-    select -1 id,e.name environment, concat(e.short_code,'-',r.label) goal_name, 'requirement' goal_dim,ret.name ref_type,t.name subgoal_name,'task' subgoal_dim,0 alternative_id,'' rationale from requirement_task rt, environment e, environment_task et, requirement r, task t, environment_requirement er, reference_type ret where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.environment_id = e.id and et.task_id = t.id and et.environment_id = er.environment_id and er.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id and rt.ref_type_id = ret.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,ret.name ref_type,t.name subgoal_name,'task' subgoal_dim,0 alternative_id,'' rationale from requirement_task rt, environment e, environment_task et, requirement r, task t, environment_requirement er, reference_type ret where et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.environment_id = e.id and et.task_id = t.id and et.environment_id = er.environment_id and er.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id and rt.ref_type_id = ret.id
     union
-    select -1 id,e.name environment, concat(a.short_code,'-',r.label) goal_name, 'requirement' goal_dim,ret.name ref_type,u.name subgoal_name,'usecase' subgoal_dim,0 alternative_id,'' rationale from requirement_usecase ru, environment e, environment_usecase eu, environment_asset ea, requirement r, usecase u, asset_requirement ar, asset a, reference_type ret where eu.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eu.environment_id = e.id and eu.usecase_id = u.id and eu.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ru.requirement_id and ru.usecase_id = u.id and ru.ref_type_id = ret.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,ret.name ref_type,u.name subgoal_name,'usecase' subgoal_dim,0 alternative_id,'' rationale from requirement_usecase ru, environment e, environment_usecase eu, environment_asset ea, requirement r, usecase u, asset_requirement ar, asset a, reference_type ret where eu.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eu.environment_id = e.id and eu.usecase_id = u.id and eu.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ru.requirement_id and ru.usecase_id = u.id and ru.ref_type_id = ret.id
     union
-    select -1 id,e.name environment, concat(e.short_code,'-',r.label) goal_name, 'requirement' goal_dim,ret.name ref_type,u.name subgoal_name,'usecase' subgoal_dim,0 alternative_id,'' rationale from requirement_usecase ru, environment e, environment_usecase eu, requirement r, usecase u, environment_requirement er, reference_type ret where eu.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eu.environment_id = e.id and eu.usecase_id = u.id and eu.environment_id = er.environment_id and er.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ru.requirement_id and ru.usecase_id = u.id and ru.ref_type_id = ret.id
+    select -1 id,e.name environment, r.name goal_name, 'requirement' goal_dim,ret.name ref_type,u.name subgoal_name,'usecase' subgoal_dim,0 alternative_id,'' rationale from requirement_usecase ru, environment e, environment_usecase eu, requirement r, usecase u, environment_requirement er, reference_type ret where eu.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eu.environment_id = e.id and eu.usecase_id = u.id and eu.environment_id = er.environment_id and er.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = ru.requirement_id and ru.usecase_id = u.id and ru.ref_type_id = ret.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacleobstacle_goalassociation ga, environment e, obstacle hg, reference_type rt, obstacle tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, asset_requirement rmr, asset rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, asset_requirement rmr, asset rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, environment_requirement rmr, environment rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hg.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, environment_requirement rmr, environment rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hg.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclegoal_goalassociation ga, environment e, obstacle hg, reference_type rt, goal tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
@@ -7026,13 +7155,15 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'goal' goal_dim,'and' ref_type,tg.name subgoal_name, 'goal' subgoal_dim,'0' alternative_id, 'None' rationale from goal tg, response_goal trg, reaction_detection_mechanism rdm, countermeasure_asset ca, countermeasure_vulnerability_response_target ctrt, response_goal hrg, goal hg, environment_goal eg, environment e where eg.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eg.environment_id = e.id and hg.id = hrg.goal_id and hrg.response_id = rdm.response_id and rdm.environment_id = eg.environment_id and rdm.asset_id = ca.asset_id and ca.countermeasure_id = ctrt.countermeasure_id and ctrt.environment_id = eg.environment_id and ctrt.response_id = trg.response_id and trg.goal_id = tg.id and tg.id = eg.goal_id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select -1 id,environmentName environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select -1 id,environmentName environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id;
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id
+    union
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'domainproperty' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacledomainproperty_goalassociation ga, environment e, obstacle hg, reference_type rt, domainproperty tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId);
   end if;
 end
 //
@@ -7054,11 +7185,11 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'response' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from responserole_goalassociation ga, environment e, response hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, reference_type rt, role tg,asset_requirement ar, asset a where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, reference_type rt, role tg,asset_requirement ar, asset a where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select -1 id,environmentName environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select -1 id,environmentName environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id
     union
     select rg.id id,e.name environment,hg.name goal_name,'role' goal_dim,'depender' ref_type, tg.name subgoal_name,'goal' subgoal_dim,'0',rg.rationale from rolegoalrole_dependency rg, role hg, goal tg, environment e where rg.environment_id = environmentId and rg.depender_id = hg.id and rg.dependency_id = tg.id and rg.environment_id = e.id
     union
@@ -7080,13 +7211,13 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'response' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from responserole_goalassociation ga, environment e, response hg, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, asset_requirement ar, asset a, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, asset_requirement ar, asset a, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select ga.id id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, reference_type rt, role tg,asset_requirement ar, asset a where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, reference_type rt, role tg,asset_requirement ar, asset a where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select -1 id,environmentName environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select -1 id,environmentName environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id
     union
     select rg.id id,e.name environment,hg.name goal_name,'role' goal_dim,'depender' ref_type, tg.name subgoal_name,'goal' subgoal_dim,'0',rg.rationale from rolegoalrole_dependency rg, role hg, goal tg, environment e where rg.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rg.depender_id = hg.id and rg.dependency_id = tg.id and rg.environment_id = e.id
     union
@@ -7125,11 +7256,11 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'response' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from responserole_goalassociation ga, environment e, response hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and tg.id = roleId
     union
-    select ga.id id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, reference_type rt, role tg,asset_requirement ar, asset a where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id and tg.id = roleId
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, reference_type rt, role tg,asset_requirement ar, asset a where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id and tg.id = roleId
     union
-    select -1 id,environmentName environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and tg.id = roleId
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and tg.id = roleId
     union
-    select -1 id,environmentName environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and tg.id = roleId
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and tg.id = roleId
     union
     select rg.id id,e.name environment,hg.name goal_name,'role' goal_dim,'depender' ref_type, tg.name subgoal_name,'goal' subgoal_dim,'0',rg.rationale from rolegoalrole_dependency rg, role hg, goal tg, environment e where rg.environment_id = environmentId and rg.depender_id = hg.id and rg.dependency_id = tg.id and rg.environment_id = e.id and hg.id = roleId
     union
@@ -7153,11 +7284,11 @@ begin
     union 
     select -1 id,e.name environment,hg.name goal_name,'response' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from responserole_goalassociation ga, environment e, response hg, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and tg.id = roleId
     union
-    select ga.id id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, reference_type rt, role tg,asset_requirement ar, asset a where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id and tg.id = roleId
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, reference_type rt, role tg,asset_requirement ar, asset a where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id and tg.id = roleId
     union
-    select -1 id,environmentName environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and tg.id = roleId
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and tg.id = roleId
     union
-    select -1 id,environmentName environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and tg.id = roleId
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and tg.id = roleId
     union
     select rg.id id,e.name environment,hg.name goal_name,'role' goal_dim,'depender' ref_type, tg.name subgoal_name,'goal' subgoal_dim,'0',rg.rationale from rolegoalrole_dependency rg, role hg, goal tg, environment e where rg.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rg.depender_id = hg.id and rg.dependency_id = tg.id and rg.environment_id = e.id and hg.id = roleId
     union
@@ -7175,13 +7306,13 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'response' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from responserole_goalassociation ga, environment e, response hg, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, asset_requirement ar, asset a, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, asset_requirement ar, asset a, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select ga.id id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, reference_type rt, role tg,asset_requirement ar, asset a where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementrole_goalassociation ga, environment e, requirement hg, reference_type rt, role tg,asset_requirement ar, asset a where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.environment_id = e.id and hg.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select -1 id,environmentName environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id
     union
-    select -1 id,environmentName environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id
     union
     select rg.id id,e.name environment,hg.name goal_name,'role' goal_dim,'depend' ref_type, tg.name subgoal_name,'goal' subgoal_dim,'0',rg.rationale from rolegoalrole_dependency rg, role hg, goal tg, environment e where rg.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and rg.depender_id = hg.id and rg.dependency_id = tg.id and rg.environment_id = e.id
     union
@@ -8021,13 +8152,27 @@ begin
   declare reqTypeId int;
   declare modId int;
   select id into reqTypeId from requirement_type where name = reqTypeName;
-  insert into requirement(label,id,version,name,description,rationale,originator,fit_criterion,priority,type,update_date) values (reqLabel,reqId,reqVersion,ifnull(reqName,''),ifnull(reqDesc,''),ifnull(reqRationale,''),ifnull(reqOriginator,''),ifnull(reqFc,''),reqPriority,reqTypeId,now());
+
+
   if isAsset = 1
   then
     select id into modId from asset where name = modName;
-    insert into asset_requirement(asset_id,requirement_id) values (modId,reqId);
   else
     select id into modId from environment where name = modName;
+  end if;
+
+  if reqLabel = -1
+  then
+    select lastNumericRequirementLabel(modId,isAsset) into reqLabel;
+    set reqLabel = reqLabel + 1;
+  end if;
+
+  insert into requirement(label,id,version,name,description,rationale,originator,fit_criterion,priority,type,update_date) values (reqLabel,reqId,reqVersion,ifnull(reqName,''),ifnull(reqDesc,''),ifnull(reqRationale,''),ifnull(reqOriginator,''),ifnull(reqFc,''),reqPriority,reqTypeId,now());
+
+  if isAsset = 1
+  then
+    insert into asset_requirement(asset_id,requirement_id) values (modId,reqId);
+  else
     insert into environment_requirement(environment_id,requirement_id) values (modId,reqId);
   end if;
 end
@@ -8267,7 +8412,7 @@ begin
     else
       set dimSql = concat(dimSql,'name');
     end if;
-    set dimSql = concat(dimSql,' = \'',dimText,'\'');
+    set dimSql = concat(dimSql,' = \"',dimText,'\"');
 
     set @sql = dimSql;
     prepare stmt from @sql;
@@ -8602,7 +8747,7 @@ begin
   declare goalId int;
   declare goalName varchar(100);
   declare taskId int;
-  declare taskName varchar(50);
+  declare taskName varchar(200);
   declare ucId int;
   declare ucName varchar(50);
 
@@ -8747,13 +8892,13 @@ begin
     union
     select 'obstacle',o.name from obstacle o, environment_obstacle eo where eo.environment_id = environmentId and eo.obstacle_id = o.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from requirementobstacle_goalassociation ro, requirement r, asset_requirement rmr, asset rm where ro.environment_id = environmentId and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement',r.name from requirementobstacle_goalassociation ro, requirement r, asset_requirement rmr, asset rm where ro.environment_id = environmentId and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from requirementobstacle_goalassociation ro, requirement r, environment_requirement rmr, environment rm where ro.environment_id = environmentId and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select 'requirement',r.name from requirementobstacle_goalassociation ro, requirement r, environment_requirement rmr, environment rm where ro.environment_id = environmentId and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from obstaclerequirement_goalassociation obr, requirement r, asset_requirement rmr, asset rm where obr.environment_id = environmentId and obr.subgoal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement',r.name from obstaclerequirement_goalassociation obr, requirement r, asset_requirement rmr, asset rm where obr.environment_id = environmentId and obr.subgoal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from obstaclerequirement_goalassociation obr, requirement r, environment_requirement rmr, environment rm where obr.environment_id = environmentId and obr.subgoal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select 'requirement',r.name from obstaclerequirement_goalassociation obr, requirement r, environment_requirement rmr, environment rm where obr.environment_id = environmentId and obr.subgoal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
     select 'task',t.name from obstacletask_goalassociation gt, task t where gt.environment_id = environmentId and gt.subgoal_id = t.id
     union
@@ -8771,13 +8916,13 @@ begin
     union
     select 'goal',g.name from goal g, response_goal rg, response re, risk ri, obstaclevulnerability_goalassociation ov where rg.goal_id = g.id and rg.response_id = re.id and re.risk_id = ri.id and ri.vulnerability_id = ov.subgoal_id and ov.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from requirementobstacle_goalassociation ro, requirement r, asset_requirement rmr, asset rm where ro.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement',r.name from requirementobstacle_goalassociation ro, requirement r, asset_requirement rmr, asset rm where ro.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from requirementobstacle_goalassociation ro, requirement r, environment_requirement rmr, environment rm where ro.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select 'requirement',r.name from requirementobstacle_goalassociation ro, requirement r, environment_requirement rmr, environment rm where ro.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ro.goal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from obstaclerequirement_goalassociation obr, requirement r, asset_requirement rmr, asset rm where obr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and obr.subgoal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select 'requirement',r.name from obstaclerequirement_goalassociation obr, requirement r, asset_requirement rmr, asset rm where obr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and obr.subgoal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select 'requirement',concat(rm.short_code,'-',r.label) from obstaclerequirement_goalassociation obr, requirement r, environment_requirement rmr, environment rm where obr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and obr.subgoal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select 'requirement',r.name from obstaclerequirement_goalassociation obr, requirement r, environment_requirement rmr, environment rm where obr.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and obr.subgoal_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
     select 'obstacle',o.name from obstacle o, environment_obstacle eo where eo.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eo.obstacle_id = o.id
     union
@@ -8805,9 +8950,9 @@ begin
   then
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacleobstacle_goalassociation ga, environment e, obstacle hg, reference_type rt, obstacle tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, asset_requirement rmr, asset rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, asset_requirement rmr, asset rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, environment_requirement rmr, environment rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId and hg.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, environment_requirement rmr, environment rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId and hg.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerole_goalassociation ga, environment e, obstacle hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
@@ -8823,21 +8968,21 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'obstacle' goal_dim,'resolve' ref_type,tg.name subgoal_name, 'goal' subgoal_dim,'0' alternative_id,concat('Mitigates ',ri.name) rationale from obstaclevulnerability_goalassociation ov,risk ri, response re, response_goal rg, environment_obstacle eo, environment_response er, environment_goal eg, environment e, obstacle hg, goal tg where ov.environment_id = environmentId and ov.environment_id = e.id and ov.environment_id = eo.environment_id and er.environment_id = eg.environment_id and eg.goal_id = tg.id and er.response_id = re.id and ov.goal_id = hg.id and ov.subgoal_id = ri.vulnerability_id and ri.id = re.risk_id and re.id = rg.response_id and rg.goal_id = tg.id and eo.obstacle_id = hg.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'misusecase' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclemisusecase_goalassociation ga, environment e, obstacle hg, reference_type rt, misusecase tg where ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id;
   else
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacleobstacle_goalassociation ga, environment e, obstacle hg, reference_type rt, obstacle tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, asset_requirement rmr, asset rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, asset_requirement rmr, asset rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,concat(rm.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, environment_requirement rmr, environment rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hg.id = rmr.requirement_id and rmr.environment_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from requirementobstacle_goalassociation ga, environment e, requirement hg, reference_type rt, obstacle tg, environment_requirement rmr, environment rm where ga.goal_id = hg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hg.id = rmr.requirement_id and rmr.environment_id = rm.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerole_goalassociation ga, environment e, obstacle hg, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
@@ -8853,13 +8998,13 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'obstacle' goal_dim,'resolve' ref_type,tg.name subgoal_name, 'goal' subgoal_dim,'0' alternative_id,concat('Mitigates ',ri.name) rationale from obstaclevulnerability_goalassociation ov, risk ri, response re, response_goal rg, environment_obstacle eo, environment_vulnerability ev, environment_response er, environment_goal eg, environment e, obstacle hg, goal tg where ev.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ev.environment_id = eo.environment_id and eo.environment_id = er.environment_id and er.environment_id = eg.environment_id and eg.goal_id = tg.id and er.response_id = re.id and ev.environment_id = e.id and ev.vulnerability_id = ov.subgoal_id and ev.environment_id = ov.environment_id and ov.goal_id = hg.id and ov.subgoal_id = ri.vulnerability_id and ri.id = re.risk_id and re.id = rg.response_id and rg.goal_id = tg.id and eo.obstacle_id = hg.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'misusecase' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclemisusecase_goalassociation ga, environment e, obstacle hg, reference_type rt, misusecase tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id;
   end if;
@@ -9119,6 +9264,10 @@ begin
   if existingId is not null
   then
     call updateValueType(existingId,vtName,vtDesc,vtType,'',vtScore,vtRat);
+    set @sql = 'set @existingId = null';
+    prepare stmt from @sql;
+    execute stmt;
+    deallocate prepare stmt;
   else
     if vtType = 'capability' or vtType = 'motivation' or vtType = 'asset_type' or vtType = 'threat_type' or vtType = 'vulnerability_type' or vtType = 'risk_class'
     then
@@ -9265,20 +9414,28 @@ begin
   if headCount = 0
   then
     insert into environment_asset (environment_id,asset_id) values (envId,headId);
-    insert into asset_property (asset_id,environment_id,property_id,property_value_id) values (headId,envId,0,0);
-    insert into asset_property (asset_id,environment_id,property_id,property_value_id) values (headId,envId,1,0);
-    insert into asset_property (asset_id,environment_id,property_id,property_value_id) values (headId,envId,2,0);
-    insert into asset_property (asset_id,environment_id,property_id,property_value_id) values (headId,envId,3,0);
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (headId,envId,0,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (headId,envId,1,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (headId,envId,2,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (headId,envId,3,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (headId,envId,4,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (headId,envId,5,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (headId,envId,6,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (headId,envId,7,0,'Implicit');
   end if;
   
   select count(asset_id) into tailCount from environment_asset where environment_id = envId and asset_id = tailId;
   if tailCount = 0
   then
     insert into environment_asset (environment_id,asset_id) values (envId,tailId);
-    insert into asset_property (asset_id,environment_id,property_id,property_value_id) values (tailId,envId,0,0);
-    insert into asset_property (asset_id,environment_id,property_id,property_value_id) values (tailId,envId,1,0);
-    insert into asset_property (asset_id,environment_id,property_id,property_value_id) values (tailId,envId,2,0);
-    insert into asset_property (asset_id,environment_id,property_id,property_value_id) values (tailId,envId,3,0);
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (tailId,envId,0,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (tailId,envId,1,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (tailId,envId,2,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (tailId,envId,3,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (tailId,envId,4,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (tailId,envId,5,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (tailId,envId,6,0,'Implicit');
+    insert into asset_property (asset_id,environment_id,property_id,property_value_id,property_rationale) values (tailId,envId,7,0,'Implicit');
   end if;
 
 end
@@ -9695,16 +9852,16 @@ begin
       insert into temp_goaltree (id,environment,goal_name,goal_dim,ref_type,subgoal_name,subgoal_dim,alternative_id,rationale)
       select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'usecase',ga.alternative_id,ga.rationale from goalusecase_goalassociation ga, environment e, goal hg, reference_type rt, usecase tg where ga.subgoal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
       union
-      select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name,tg.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id,'' rationale from requirement_usecase ga, environment e, requirement hg, usecase tg,asset_requirement ar, asset a,environment_usecase eu, reference_type rt where ga.usecase_id = goalId and ga.requirement_id = hg.id and ga.usecase_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and ga.usecase_id = eu.usecase_id and eu.environment_id = environmentId and ga.ref_type_id = rt.id
+      select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name,tg.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id,'' rationale from requirement_usecase ga, environment e, requirement hg, usecase tg,asset_requirement ar, asset a,environment_usecase eu, reference_type rt where ga.usecase_id = goalId and ga.requirement_id = hg.id and ga.usecase_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and ga.usecase_id = eu.usecase_id and eu.environment_id = environmentId and ga.ref_type_id = rt.id
       union
-      select -1 id,envName environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name,tg.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id,'' rationale from requirement_usecase ga, requirement hg, usecase tg,environment_requirement er, environment e, environment_usecase eu, reference_type rt where ga.usecase_id = goalId and ga.requirement_id = hg.id and ga.usecase_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and ga.usecase_id = eu.usecase_id and eu.environment_id = environmentId and ga.ref_type_id = rt.id;
+      select -1 id,envName environment,hg.name goal_name,'requirement' goal_dim,rt.name,tg.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id,'' rationale from requirement_usecase ga, requirement hg, usecase tg,environment_requirement er, environment e, environment_usecase eu, reference_type rt where ga.usecase_id = goalId and ga.requirement_id = hg.id and ga.usecase_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and ga.usecase_id = eu.usecase_id and eu.environment_id = environmentId and ga.ref_type_id = rt.id;
     else
       insert into temp_goaltree (id,environment,goal_name,goal_dim,ref_type,subgoal_name,subgoal_dim,alternative_id,rationale)
       select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'usecase',ga.alternative_id,ga.rationale from goalusecase_goalassociation ga, environment e, goal hg, reference_type rt, usecase tg where ga.subgoal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
       union
-      select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name,tg.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id,'' rationale from requirement_usecase ga, environment e, requirement hg, usecase tg,asset_requirement ar, asset a,environment_usecase eu, reference_type rt where ga.requirement_id = hg.id and ga.usecase_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and ga.usecase_id = eu.usecase_id and eu.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.ref_type_id = rt.id
+      select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,rt.name,tg.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id,'' rationale from requirement_usecase ga, environment e, requirement hg, usecase tg,asset_requirement ar, asset a,environment_usecase eu, reference_type rt where ga.requirement_id = hg.id and ga.usecase_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and ga.usecase_id = eu.usecase_id and eu.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.ref_type_id = rt.id
       union
-      select -1 id,envName environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,rt.name,tg.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id,'' rationale from requirement_usecase ga, requirement hg, usecase tg,environment_requirement er, environment e, environment_usecase eu, reference_type rt where ga.requirement_id = hg.id and ga.usecase_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and ga.usecase_id = eu.usecase_id and eu.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.ref_type_id = rt.id;
+      select -1 id,envName environment,hg.name goal_name,'requirement' goal_dim,rt.name,tg.name subgoal_name,'usecase' subgoal_dim,'0' alternative_id,'' rationale from requirement_usecase ga, requirement hg, usecase tg,environment_requirement er, environment e, environment_usecase eu, reference_type rt where ga.requirement_id = hg.id and ga.usecase_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and ga.usecase_id = eu.usecase_id and eu.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.ref_type_id = rt.id;
     end if;
   else
   if compositeCount <= 0
@@ -9712,13 +9869,13 @@ begin
     insert into temp_goaltree (id,environment,goal_name,goal_dim,ref_type,subgoal_name,subgoal_dim,alternative_id,rationale)
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'goal',ga.alternative_id,ga.rationale from goalgoal_goalassociation ga, environment e, goal hg, reference_type rt, goal tg where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id,e.name,hg.name,'goal',rt.name,concat(rm.short_code,'-',tg.label),'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'task',ga.alternative_id,ga.rationale from goaltask_goalassociation ga, environment e, goal hg, reference_type rt, task tg where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'usecase',ga.alternative_id,ga.rationale from goalusecase_goalassociation ga, environment e, goal hg, reference_type rt, usecase tg where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id,e.name,hg.name,'goal',rt.name,concat(rm.short_code,'-',tg.label),'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'domainproperty',ga.alternative_id,ga.rationale from goaldomainproperty_goalassociation ga, environment e, goal hg, reference_type rt, domainproperty tg where ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId
     union
@@ -9732,20 +9889,22 @@ begin
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerole_goalassociation ga, environment e, obstacle hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id = environmentId
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id = environmentId
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id = environmentId;
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id = environmentId
+    union
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'domainproperty' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacledomainproperty_goalassociation ga, environment e, obstacle hg, reference_type rt, domainproperty tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId;
   else
     insert into temp_goaltree (id,environment,goal_name,goal_dim,ref_type,subgoal_name,subgoal_dim,alternative_id,rationale)
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'goal',ga.alternative_id,ga.rationale from goalgoal_goalassociation ga, environment e, goal hg, reference_type rt, goal tg where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id,e.name,hg.name,'goal',rt.name,concat(rm.short_code,'-',tg.label),'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'task',ga.alternative_id,ga.rationale from goaltask_goalassociation ga, environment e, goal hg, reference_type rt, task tg where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'usecase',ga.alternative_id,ga.rationale from goalusecase_goalassociation ga, environment e, goal hg, reference_type rt, usecase tg where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id,e.name,hg.name,'goal',rt.name,concat(rm.short_code,'-',tg.label),'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'domainproperty',ga.alternative_id,ga.rationale from goaldomainproperty_goalassociation ga, environment e, goal hg, reference_type rt, domainproperty tg where ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId
     union
@@ -9759,9 +9918,11 @@ begin
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerole_goalassociation ga, environment e, obstacle hg, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId);
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
+    union
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'domainproperty' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacledomainproperty_goalassociation ga, environment e, obstacle hg, reference_type rt, domainproperty tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId);
   end if;
   end if;
 
@@ -9817,13 +9978,13 @@ begin
     insert into temp_goaltree (id,environment,goal_name,goal_dim,ref_type,subgoal_name,subgoal_dim,alternative_id,rationale)
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'goal',ga.alternative_id,ga.rationale from goalgoal_goalassociation ga, environment e, goal hg, reference_type rt, goal tg where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id,e.name,hg.name,'goal',rt.name,concat(rm.short_code,'-',tg.label),'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'task',ga.alternative_id,ga.rationale from goaltask_goalassociation ga, environment e, goal hg, reference_type rt, task tg where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'usecase',ga.alternative_id,ga.rationale from goalusecase_goalassociation ga, environment e, goal hg, reference_type rt, usecase tg where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id,e.name,hg.name,'goal',rt.name,concat(rm.short_code,'-',tg.label),'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'domainproperty',ga.alternative_id,ga.rationale from goaldomainproperty_goalassociation ga, environment e, goal hg, reference_type rt, domainproperty tg where ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId
     union
@@ -9833,15 +9994,15 @@ begin
     union
     select -1,e.name,hg.name,'goal','and',tg.name,'goal','0','None' from goal tg, response_goal trg, reaction_detection_mechanism rdm, countermeasure_asset ca, countermeasure_vulnerability_response_target ctrt, response_goal hrg, goal hg, environment_goal eg, environment e where eg.goal_id = goalId and eg.environment_id = environmentId and eg.environment_id = e.id and hg.id = hrg.goal_id and hrg.response_id = rdm.response_id and rdm.environment_id = eg.environment_id and rdm.asset_id = ca.asset_id and ca.countermeasure_id = ctrt.countermeasure_id and ctrt.environment_id = eg.environment_id and ctrt.response_id = trg.response_id and trg.goal_id = tg.id and tg.id = eg.goal_id
     union
-    select -1,e.name,concat(a.short_code,'-',r.label),'requirement','and',t.name,'task',0,'' from requirement_task rt, environment e, environment_task et, environment_asset ea, requirement r, task t, asset_requirement ar, asset a where rt.requirement_id = goalId and  et.environment_id = environmentId and et.environment_id = e.id and et.task_id = t.id and et.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id
+    select -1,e.name,r.name,'requirement','and',t.name,'task',0,'' from requirement_task rt, environment e, environment_task et, environment_asset ea, requirement r, task t, asset_requirement ar, asset a where rt.requirement_id = goalId and  et.environment_id = environmentId and et.environment_id = e.id and et.task_id = t.id and et.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrole_goalassociation ga, environment e, goal hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerole_goalassociation ga, environment e, obstacle hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id = environmentId
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id = environmentId
     union
-    select -1 id,environmentName environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id = environmentId
+    select -1 id,environmentName environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id = environmentId
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacleobstacle_goalassociation ga, environment e, obstacle hg, reference_type rt, obstacle tg where ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId
     union
@@ -9849,22 +10010,24 @@ begin
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'usecase' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacleusecase_goalassociation ga, environment e, obstacle hg, reference_type rt, usecase tg where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclegoal_goalassociation ga, environment e, obstacle hg, reference_type rt, goal tg where ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId;
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclegoal_goalassociation ga, environment e, obstacle hg, reference_type rt, goal tg where ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId
+    union
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'domainproperty' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacledomainproperty_goalassociation ga, environment e, obstacle hg, reference_type rt, domainproperty tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id = environmentId;
   else
     insert into temp_goaltree (id,environment,goal_name,goal_dim,ref_type,subgoal_name,subgoal_dim,alternative_id,rationale)
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'goal',ga.alternative_id,ga.rationale from goalgoal_goalassociation ga, environment e, goal hg, reference_type rt, goal tg where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id,e.name,hg.name,'goal',rt.name,concat(rm.short_code,'-',tg.label),'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'task',ga.alternative_id,ga.rationale from goaltask_goalassociation ga, environment e, goal hg, reference_type rt, task tg where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'usecase',ga.alternative_id,ga.rationale from goalusecase_goalassociation ga, environment e, goal hg, reference_type rt, usecase tg where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id,e.name,hg.name,'goal',rt.name,concat(rm.short_code,'-',tg.label),'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'requirement',ga.alternative_id,ga.rationale from goalrequirement_goalassociation ga, environment e, goal hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
     select ga.id,e.name,hg.name,'goal',rt.name,tg.name,'domainproperty',ga.alternative_id,ga.rationale from goaldomainproperty_goalassociation ga, environment e, goal hg, reference_type rt, domainproperty tg where ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
@@ -9874,17 +10037,17 @@ begin
     union
     select -1,e.name,hg.name,'goal','and',tg.name,'goal','0','None' from goal tg, response_goal trg, reaction_detection_mechanism rdm, countermeasure_asset ca, countermeasure_vulnerability_response_target ctrt, response_goal hrg, goal hg, environment_goal eg, environment e where eg.goal_id = goalId and eg.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and eg.environment_id = e.id and hg.id = hrg.goal_id and hrg.response_id = rdm.response_id and rdm.environment_id = eg.environment_id and rdm.asset_id = ca.asset_id and ca.countermeasure_id = ctrt.countermeasure_id and ctrt.environment_id = eg.environment_id and ctrt.response_id = trg.response_id and trg.goal_id = tg.id and tg.id = eg.goal_id
     union
-    select -1,e.name,concat(a.short_code,'-',r.label),'requirement','and',t.name,'task',0,'' from requirement_task rt, environment e, environment_task et, environment_asset ea, requirement r, task t, asset_requirement ar, asset a where rt.requirement_id = goalId and  et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.environment_id = e.id and et.task_id = t.id and et.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id
+    select -1,e.name,r.name,'requirement','and',t.name,'task',0,'' from requirement_task rt, environment e, environment_task et, environment_asset ea, requirement r, task t, asset_requirement ar, asset a where rt.requirement_id = goalId and  et.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and et.environment_id = e.id and et.task_id = t.id and et.environment_id = ea.environment_id and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and r.id = rt.requirement_id and rt.task_id = t.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'goal' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from goalrole_goalassociation ga, environment e, goal hg, reference_type rt, role tg where ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'role' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerole_goalassociation ga, environment e, obstacle hg, reference_type rt, role tg where ga.environment_id = environmentId and ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = goalId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, goalrequirement_goalassociation grga where ga.requirement_id = goalId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.goal_id = goalId and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'obstacle' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacleobstacle_goalassociation ga, environment e, obstacle hg, reference_type rt, obstacle tg where ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
@@ -9892,9 +10055,11 @@ begin
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'usecase' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstacleusecase_goalassociation ga, environment e, obstacle hg, reference_type rt, usecase tg where ga.environment_id in (select environment_id from composite_environment where ga.goal_id = goalId and composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id in (select environment_id from composite_environment where ga.goal_id = goalId and composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm, environment_asset ea where ga.environment_id in (select environment_id from composite_environment where ga.goal_id = goalId and composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id and rmr.asset_id = ea.asset_id and ea.environment_id = ga.environment_id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = goalId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    union
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclegoal_goalassociation ga, environment e, obstacle hg, reference_type rt, goal tg where ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'goal' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclegoal_goalassociation ga, environment e, obstacle hg, reference_type rt, goal tg where ga.goal_id = goalId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId);
   end if;
@@ -9942,7 +10107,7 @@ begin
     union
     select -1 id,e.name environment,t.name goal_dim,'task' goal_dim,'taskmisusecasethreat_association' ref_type,m.name subgoal_name, 'misusecase' subgoal_dim,'1' alternative_id, concat('&lt;&lt;',r.name,' threatens&gt;&gt;') rationale from misusecase m,misusecase_risk mr, risk r, asset_threat tha, threat th, task_asset taa,task t, environment_task et, environment e where m.id = mr.misusecase_id and mr.risk_id = r.id and r.threat_id = tha.threat_id and et.environment_id = environmentId and tha.asset_id = taa.asset_id and taa.task_id = t.id and t.id = et.task_id and et.environment_id = tha.environment_id and et.environment_id = taa.environment_id and et.environment_id = e.id and tha.threat_id = th.id and taa.task_id = taskId
     union
-    select -1 id,e.name environment,t.name goal_dim,'task' goal_dim,'taskmisusecasevulnerability_association' ref_type,m.name subgoal_name, 'misusecase' subgoal_dim,'1' alternative_id, concat('&lt;&lt;exploits ',r.name,'&gt;&gt;') rationale from misusecase m,misusecase_risk mr, risk r, asset_vulnerability tha, task_asset taa,task t, environment_task et, environment e, vulnerability v where m.id = mr.misusecase_id and mr.risk_id = r.id and r.vulnerability_id = tha.vulnerability_id and et.environment_id = environmentId and tha.asset_id = taa.asset_id and taa.task_id = t.id and t.id = et.task_id and et.environment_id = tha.environment_id and et.environment_id = taa.environment_id and et.environment_id = e.id and tha.vulnerability_id = v.id and taa.task_id = taskId
+    select -1 id,e.name environment,t.name goal_dim,'task' goal_dim,'taskmisusecasevulnerability_association' ref_type,m.name subgoal_name, 'misusecase' subgoal_dim,'1' alternative_id, concat('&lt;&lt;exploits ',r.name,'&gt;&gt;') rationale from misusecase m,misusecase_risk mr, risk r, asset_vulnerability tha, task_asset taa,task t, environment_task et, environment e, vulnerability v, environment_risk er where m.id = mr.misusecase_id and mr.risk_id = r.id and r.vulnerability_id = tha.vulnerability_id and et.environment_id = environmentId and tha.asset_id = taa.asset_id and taa.task_id = t.id and t.id = et.task_id and et.environment_id = tha.environment_id and et.environment_id = taa.environment_id and et.environment_id = e.id and tha.vulnerability_id = v.id and taa.task_id = taskId and et.environment_id = er.environment_id and er.id = mr.risk_id
     union
     select -1 id,e.name environment,mc.name goal_name, 'misusecase' goal_dim,'misusecasethreatmitigation_association' ref_type,a.name subgoal_name, 'asset' subgoal_dim,'0' alternative_id, concat('&lt;&lt;mitigates ',t.name,'&gt;&gt;') rationale from misusecase mc, misusecase_risk mr, threat t, countermeasure_threat_target ctt, countermeasure_asset ca, asset a, task_asset ta, risk r, environment e where mc.id = mr.misusecase_id and mr.risk_id = r.id and r.threat_id = t.id and t.id = ctt.threat_id and ctt.environment_id = environmentId and ctt.environment_id = e.id and ctt.countermeasure_id = ca.countermeasure_id and ca.asset_id = a.id and a.id = ta.asset_id and ta.environment_id = ctt.environment_id and ta.task_id = taskId
     union
@@ -10328,12 +10493,22 @@ begin
   if assetId = -1
   then
     delete from securitypattern_asset_template_asset;
+    delete from component_classassociation;
+    delete from connector;
     delete from component_asset_template_asset;
+    delete from template_requirement;
+    delete from template_goal_concern;
     delete from template_asset_interface;
     delete from template_asset_tag;
+    delete from template_asset_property;
     delete from template_asset;
   else
     call delete_template_asset_properties(assetId);
+    delete from component_classassociation where head_id = assetId;
+    delete from component_classassociation where tail_id = assetId;
+    delete from connector where template_asset_id = assetId;
+    delete from template_requirement where asset_id = assetId;
+    delete from template_goal_concern where template_asset_id = assetId;
     delete from template_asset_interface where template_asset_id = assetId;
     delete from securitypattern_asset_template_asset where template_asset_id = assetId;
     delete from component_asset_template_asset where template_asset_id = assetId;
@@ -10796,9 +10971,9 @@ begin
   select id into patternId from securitypattern where name = patternName;
 
   insert into countermeasure_asset(countermeasure_id,asset_id)
-  select cmId,ata.asset_id from securitypattern_asset_template_asset ata, securitypattern_classassociation sca where sca.pattern_id = patternId and sca.pattern_id = ata.pattern_id and sca.head_id = ata.template_asset_id 
+  select cmId,ata.asset_id from securitypattern_asset_template_asset ata, securitypattern_classassociation sca, environment_asset ea, environment_countermeasure ec where sca.pattern_id = patternId and sca.pattern_id = ata.pattern_id and sca.head_id = ata.template_asset_id and ata.asset_id = ea.asset_id and ea.environment_id = ec.environment_id and ec.countermeasure_id = cmId
   union 
-  select cmId,ata.asset_id from securitypattern_asset_template_asset ata, securitypattern_classassociation sca where sca.pattern_id = patternId and sca.pattern_id = ata.pattern_id and sca.tail_id = ata.template_asset_id;
+  select cmId,ata.asset_id from securitypattern_asset_template_asset ata, securitypattern_classassociation sca, environment_asset ea, environment_countermeasure ec where sca.pattern_id = patternId and sca.pattern_id = ata.pattern_id and sca.tail_id = ata.template_asset_id and ata.asset_id = ea.asset_id and ea.environment_id = ec.environment_id and ec.countermeasure_id = cmId;
 
   insert into countermeasure_securitypattern(countermeasure_id,pattern_id) values (cmId,patternId);
 
@@ -10926,7 +11101,7 @@ begin
   declare pId int;
 
   select id into pId from persona where name = pName;
-  select distinct dr.name,ed.name,dr.excerpt from document_reference dr, external_document ed, persona_characteristic_document pcd, persona_characteristic pc where dr.document_id = ed.id and dr.id = pcd.reference_id and pcd.characteristic_id = pc.id and pc.persona_id = pId order by 1;
+  select distinct dr.name,ed.name,xmlEscaped(dr.excerpt) from document_reference dr, external_document ed, persona_characteristic_document pcd, persona_characteristic pc where dr.document_id = ed.id and dr.id = pcd.reference_id and pcd.characteristic_id = pc.id and pc.persona_id = pId order by 1;
 end
 //
 
@@ -10953,9 +11128,9 @@ begin
   union
   select pr.name,'persona' dimension_name,p.name object_name,pr.description from persona_reference pr, persona p, persona_characteristic_persona pcp, persona_characteristic pc where pr.persona_id = p.id and pr.id = pcp.reference_id and pcp.characteristic_id = pc.id and pc.persona_id = personaId
   union
-  select rr.name,'requirement' dimension_name,concat(a.short_code,'-',r.label) object_name,rr.description from requirement_reference rr, requirement r, asset a, asset_requirement ar, persona_characteristic_requirement pcr, persona_characteristic pc where rr.requirement_id = r.id and r.id = ar.requirement_id and ar.asset_id = a.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rr.id = pcr.reference_id and pcr.characteristic_id = pc.id and pc.persona_id = personaId
+  select rr.name,'requirement' dimension_name,r.name object_name,rr.description from requirement_reference rr, requirement r, asset a, asset_requirement ar, persona_characteristic_requirement pcr, persona_characteristic pc where rr.requirement_id = r.id and r.id = ar.requirement_id and ar.asset_id = a.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rr.id = pcr.reference_id and pcr.characteristic_id = pc.id and pc.persona_id = personaId
   union
-  select rr.name,'requirement' dimension_name,concat(e.short_code,'-',r.label) object_name,rr.description from requirement_reference rr, requirement r, environment e, environment_requirement er, persona_characteristic_requirement pcr, persona_characteristic pc where rr.requirement_id = r.id and r.id = er.requirement_id and er.environment_id = e.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rr.id = pcr.reference_id and pcr.characteristic_id = pc.id and pc.persona_id = personaId
+  select rr.name,'requirement' dimension_name,r.name object_name,rr.description from requirement_reference rr, requirement r, environment e, environment_requirement er, persona_characteristic_requirement pcr, persona_characteristic pc where rr.requirement_id = r.id and r.id = er.requirement_id and er.environment_id = e.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rr.id = pcr.reference_id and pcr.characteristic_id = pc.id and pc.persona_id = personaId
   union
   select rr.name,'risk' dimension_name,r.name object_name,rr.description from risk_reference rr, risk r, persona_characteristic_risk pcr, persona_characteristic pc where rr.risk_id = r.id and rr.id = pcr.reference_id and pcr.characteristic_id = pc.id and pc.persona_id = personaId
   union
@@ -10967,7 +11142,7 @@ begin
   union
   select tr.name,'threat' dimension_name,t.name object_name,tr.description from threat_reference tr, threat t, persona_characteristic_threat pct, persona_characteristic pc where tr.threat_id = t.id and tr.id = pct.reference_id and pct.characteristic_id = pc.id and pc.persona_id = personaId
   union
-  select vr.name,'vulnerability' dimension_name,v.name object_name,vr.description from vulnerability_reference vr, vulnerability v, persona_characteristic_vulnerability pcv, persona_characteristic pc where vr.vulnerability_id = v.id and vr.id = pcv.reference_id and pcv.characteristic_id = pc.id and pc.persona_id = personaId;
+  select vr.name, 'risk', v.name,'vulnerability' dimension_name,v.name object_name,vr.description from vulnerability_reference vr, vulnerability v, persona_characteristic_vulnerability pcv, persona_characteristic pc where vr.vulnerability_id = v.id and vr.id = pcv.reference_id and pcv.characteristic_id = pc.id and pc.persona_id = personaId;
 end
 //
 
@@ -12088,13 +12263,13 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'obstacle' goal_dim,'resolve' ref_type,tg.name subgoal_name, 'goal' subgoal_dim,'0' alternative_id,concat('Mitigates ',ri.name) rationale from obstaclevulnerability_goalassociation ov,risk ri, response re, response_goal rg, environment_obstacle eo, environment_response er, environment_goal eg, environment e, obstacle hg, goal tg where ov.goal_id = obsId and ov.environment_id = environmentId and ov.environment_id = e.id and ov.environment_id = eo.environment_id and er.environment_id = eg.environment_id and eg.goal_id = tg.id and er.response_id = re.id and ov.goal_id = hg.id and ov.subgoal_id = ri.vulnerability_id and ri.id = re.risk_id and re.id = rg.response_id and rg.goal_id = tg.id and eo.obstacle_id = hg.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = obsId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = obsId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = obsId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = obsId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId and grga.environment_id = e.id
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId and grga.environment_id = e.id
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId and grga.environment_id = e.id
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId and grga.environment_id = e.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'misusecase' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclemisusecase_goalassociation ga, environment e, obstacle hg, reference_type rt, misusecase tg where ga.goal_id = obsId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id;
   else
@@ -12115,13 +12290,13 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'obstacle' goal_dim,'resolve' ref_type,tg.name subgoal_name, 'goal' subgoal_dim,'0' alternative_id,concat('Mitigates ',ri.name) rationale from obstaclevulnerability_goalassociation ov,risk ri, response re, response_goal rg, environment_obstacle eo, environment_response er, environment_goal eg, environment e, obstacle hg, goal tg where ov.goal_id = obsId and ov.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ov.environment_id = e.id and ov.environment_id = eo.environment_id and er.environment_id = eg.environment_id and eg.goal_id = tg.id and er.response_id = re.id and ov.goal_id = hg.id and ov.subgoal_id = ri.vulnerability_id and ri.id = re.risk_id and re.id = rg.response_id and rg.goal_id = tg.id and eo.obstacle_id = hg.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = obsId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = obsId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = obsId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = obsId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and grga.environment_id = e.id
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and grga.environment_id = e.id
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and grga.environment_id = e.id
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and grga.environment_id = e.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'misusecase' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclemisusecase_goalassociation ga, environment e, obstacle hg, reference_type rt, misusecase tg where ga.goal_id = obsId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id;
 
@@ -12178,13 +12353,13 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'obstacle' goal_dim,'resolve' ref_type,tg.name subgoal_name, 'goal' subgoal_dim,'0' alternative_id,concat('Mitigates ',ri.name) rationale from obstaclevulnerability_goalassociation ov, risk ri, response re, response_goal rg, environment_obstacle eo, environment_vulnerability ev, environment_response er, environment_goal eg, environment e, obstacle hg, goal tg where ov.goal_id = obsId and ev.environment_id = environmentId and ev.environment_id = eo.environment_id and eo.environment_id = er.environment_id and er.environment_id = eg.environment_id and eg.goal_id = tg.id and er.response_id = re.id and ev.environment_id = e.id and ev.vulnerability_id = ov.subgoal_id and ev.environment_id = ov.environment_id and ov.goal_id = hg.id and ov.subgoal_id = ri.vulnerability_id and ri.id = re.risk_id and re.id = rg.response_id and rg.goal_id = tg.id and eo.obstacle_id = hg.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = obsId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = obsId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = obsId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = obsId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId and grga.environment_id = e.id
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId and grga.environment_id = e.id
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId and grga.environment_id = e.id
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id = environmentId and grga.environment_id = e.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'misusecase' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclemisusecase_goalassociation ga, environment e, goal hg, reference_type rt, misusecase tg where ga.goal_id = obsId and ga.environment_id = environmentId and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id;
   else
@@ -12205,13 +12380,13 @@ begin
     union
     select -1 id,e.name environment,hg.name goal_name,'obstacle' goal_dim,'resolve' ref_type,tg.name subgoal_name, 'goal' subgoal_dim,'0' alternative_id,concat('Mitigates ',ri.name) rationale from obstaclevulnerability_goalassociation ov, risk ri, response re, response_goal rg, environment_obstacle eo, environment_vulnerability ev, environment_response er, environment_goal eg, environment e, obstacle hg, goal tg where ov.goal_id = obsId and ev.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ev.environment_id = eo.environment_id and eo.environment_id = er.environment_id and er.environment_id = eg.environment_id and eg.goal_id = tg.id and er.response_id = re.id and ev.environment_id = e.id and ev.vulnerability_id = ov.subgoal_id and ev.environment_id = ov.environment_id and ov.goal_id = hg.id and ov.subgoal_id = ri.vulnerability_id and ri.id = re.risk_id and re.id = rg.response_id and rg.goal_id = tg.id and eo.obstacle_id = hg.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = obsId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, asset_requirement rmr, asset rm where ga.goal_id = obsId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and ga.environment_id = e.id and tg.id = rmr.requirement_id and rmr.asset_id = rm.id
     union
-    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,concat(rm.short_code,'-',tg.label) subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = obsId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
+    select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'requirement' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclerequirement_goalassociation ga, environment e, obstacle hg, reference_type rt, requirement tg, environment_requirement rmr, environment rm where ga.goal_id = obsId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and tg.version = (select max(i.version) from requirement i where i.id = tg.id) and rmr.environment_id = e.id and tg.id = rmr.requirement_id and rmr.environment_id = rm.id and rmr.environment_id = ga.environment_id
     union
-    select -1 id,e.name environment,concat(a.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and grga.environment_id = e.id
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, environment e, requirement hg, role tg,asset_requirement ar, asset a,obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = ar.requirement_id and ar.asset_id = a.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and grga.environment_id = e.id
     union
-    select -1 id,e.name environment,concat(e.short_code,'-',hg.label) goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and grga.environment_id = e.id
+    select -1 id,e.name environment,hg.name goal_name,'requirement' goal_dim,'responsible' ref_type,tg.name subgoal_name,'role' subgoal_dim,'0' alternative_id,'' rationale from requirement_role ga, requirement hg, role tg,environment_requirement er, environment e, obstaclerequirement_goalassociation grga where grga.goal_id = obsId and ga.requirement_id = hg.id and ga.role_id = tg.id and hg.version = (select max(i.version) from requirement i where i.id = hg.id) and hg.id = er.requirement_id and er.environment_id = e.id and grga.subgoal_id = ga.requirement_id and grga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and grga.environment_id = e.id
     union
     select ga.id id,e.name environment,hg.name goal_name,'obstacle' goal_dim,rt.name ref_type,tg.name subgoal_name,'misusecase' subgoal_dim,ga.alternative_id alternative_id,ga.rationale from obstaclemisusecase_goalassociation ga, environment e, goal hg, reference_type rt, misusecase tg where ga.goal_id = obsId and ga.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id;
   end if;
@@ -12255,9 +12430,9 @@ begin
     union
     select -1,he.name,ha.name,'asset',0,hat.name,hm.name,a.head_role_name,a.tail_role_name,tm.name,tat.name,0,'asset',ta.name,concat('Concerns Security Pattern ',sp.name) rationale from securitypattern_classassociation a, environment he, environment te, asset ha, template_asset hta, multiplicity_type hm, association_type hat, association_type tat, multiplicity_type tm, asset ta, template_asset tta, environment_asset hea, environment_asset tea, securitypattern_asset_template_asset hata, securitypattern_asset_template_asset tata,securitypattern sp where a.head_id = assetId and hea.environment_id = environmentId and hea.environment_id = tea.environment_id and hea.environment_id = he.id and tea.environment_id = te.id and hea.asset_id = ha.id and tea.asset_id = ta.id and a.head_id = hta.id and a.head_multiplicity_id = hm.id and a.head_association_type_id = hat.id and a.tail_association_type_id = tat.id and a.tail_multiplicity_id = tm.id and a.tail_id = tta.id and ha.id = hata.asset_id and hata.template_asset_id = hta.id and hata.pattern_id = sp.id and ta.id = tata.asset_id and tata.template_asset_id = tta.id and tata.pattern_id = sp.id and a.pattern_id = sp.id
     union
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id = environmentId and at.environment_id = environmentId and at.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at, environment_asset ea where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id = environmentId and at.environment_id = environmentId and at.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id = environmentId
     union 
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id = environmentId and av.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av, environment_asset ea where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id = environmentId and av.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id = environmentId
     union
     select -1,e.name,p.name,'persona',0,'Association','1','','','1','Association',0,'asset', a.name,'' rationale from persona p, asset a, environment e, task_asset ta, task_persona tp where ta.asset_id = assetId and p.id = tp.persona_id and tp.environment_id = environmentId and tp.task_id = ta.task_id and ta.environment_id = tp.environment_id and ta.asset_id = a.id and ta.environment_id = e.id
     union
@@ -12282,9 +12457,9 @@ begin
     union
     select -1,he.name,ha.name,'asset',0,hat.name,hm.name,a.head_role_name,a.tail_role_name,tm.name,tat.name,0,'asset',ta.name,concat('Concerns Security Pattern ',sp.name) rationale from securitypattern_classassociation a, environment he, environment te, asset ha, template_asset hta, multiplicity_type hm, association_type hat, association_type tat, multiplicity_type tm, asset ta, template_asset tta, environment_asset hea, environment_asset tea, securitypattern_asset_template_asset hata, securitypattern_asset_template_asset tata,securitypattern sp where a.head_id = assetId and hea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and hea.environment_id = tea.environment_id and hea.environment_id = he.id and tea.environment_id = te.id and hea.asset_id = ha.id and tea.asset_id = ta.id and a.head_id = hta.id and a.head_multiplicity_id = hm.id and a.head_association_type_id = hat.id and a.tail_association_type_id = tat.id and a.tail_multiplicity_id = tm.id and a.tail_id = tta.id and ha.id = hata.asset_id and hata.template_asset_id = hta.id and hata.pattern_id = sp.id and ta.id = tata.asset_id and tata.template_asset_id = tta.id and tata.pattern_id = sp.id and a.pattern_id = sp.id
     union
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id = environmentId and at.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at, environment_asset ea where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id = environmentId and at.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union 
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av, environment_asset ea where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
     select -1,e.name,p.name,'persona',0,'Association','1','','','1','Association',0,'asset', a.name,'' rationale from persona p, asset a, environment e, task_asset ta, task_persona tp where ta.asset_id = assetId and p.id = tp.persona_id and tp.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and tp.task_id = ta.task_id and ta.environment_id = tp.environment_id and ta.asset_id = a.id and ta.environment_id = e.id
     union
@@ -12332,9 +12507,9 @@ begin
     insert into temp_classtree(id,environment,head_name,head_dim,head_nav,head_assoc,head_mult,head_role,tail_role,tail_mult,tail_assoc,tail_nav,tail_dim,tail_name,rationale)
     select a.id,e.name,ha.name,'asset',a.head_navigation,hat.name,hm.name,a.head_role_name,a.tail_role_name,tm.name,tat.name,a.tail_navigation,'asset',ta.name,'' rationale from classassociation a, environment e, asset ha, multiplicity_type hm, association_type hat, association_type tat, multiplicity_type tm, asset ta, environment_asset hea, environment_asset tea where a.head_id = assetId and a.environment_id = environmentId and a.environment_id = e.id and a.head_id = ha.id and a.head_multiplicity_id = hm.id and a.head_association_type_id = hat.id and a.tail_association_type_id = tat.id and a.tail_multiplicity_id = tm.id and a.tail_id = ta.id and ha.id = hea.asset_id and hea.environment_id = a.environment_id and ta.id = tea.asset_id and tea.environment_id = a.environment_id
     union
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id = environmentId and at.environment_id = environmentId and at.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at, environment_asset ea where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id = environmentId and at.environment_id = environmentId and at.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id = environmentId
     union 
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id = environmentId and av.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av, environment_asset ea where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id = environmentId and av.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id = environmentId
     union
     select -1,e.name,p.name,'persona',0,'Association','1','','','1','Association',0,'asset', a.name,'' rationale from persona p, asset a, environment e, task_asset ta, task_persona tp, environment_asset ea where ta.asset_id = assetId and p.id = tp.persona_id and tp.environment_id = environmentId and tp.task_id = ta.task_id and ta.environment_id = tp.environment_id and ta.asset_id = a.id and ta.environment_id = e.id and ta.environment_id = ea.environment_id and ea.asset_id = assetId
     union
@@ -12351,9 +12526,9 @@ begin
     insert into temp_classtree(id,environment,head_name,head_dim,head_nav,head_assoc,head_mult,head_role,tail_role,tail_mult,tail_assoc,tail_nav,tail_dim,tail_name,rationale)
     select a.id,e.name,ha.name,'asset',a.head_navigation,hat.name,hm.name,a.head_role_name,a.tail_role_name,tm.name,tat.name,a.tail_navigation,'asset',ta.name,'' rationale from classassociation a, environment e, asset ha, multiplicity_type hm, association_type hat, association_type tat, multiplicity_type tm, asset ta, environment_asset hea, environment_asset tea where a.head_id = assetId and a.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and a.environment_id = e.id and a.head_id = ha.id and a.head_multiplicity_id = hm.id and a.head_association_type_id = hat.id and a.tail_association_type_id = tat.id and a.tail_multiplicity_id = tm.id and a.tail_id = ta.id and ha.id = hea.asset_id and hea.environment_id = a.environment_id and ta.id = tea.asset_id and tea.environment_id = a.environment_id
     union
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id = environmentId and at.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e, countermeasure_asset ca, countermeasure_threat_target ctt, asset_threat at, environment_asset ea where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = ctt.countermeasure_id and ctt.threat_id = at.threat_id and at.asset_id = va.id and ctt.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and at.environment_id = environmentId and at.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union 
-    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id = e.id
+    select -1,e.name,va.name,'asset',0,'Dependency','1','&lt;&lt;safeguards&gt;&gt;','','1','Association',0,'asset',ma.name,'' rationale from asset ma, asset va, environment e,countermeasure_asset ca, countermeasure_vulnerability_target cvt, asset_vulnerability av, environment_asset ea where ma.id = ca.asset_id and ca.asset_id = assetId and ca.countermeasure_id = cvt.countermeasure_id and cvt.vulnerability_id = av.vulnerability_id and av.asset_id = va.id and cvt.environment_id = environmentId and av.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and av.environment_id = e.id and ca.asset_id = ea.asset_id and ea.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId)
     union
     select -1,e.name,p.name,'persona',0,'Association','1','','','1','Association',0,'asset', a.name,'' rationale from persona p, asset a, environment e, task_asset ta, task_persona tp, environment_asset ea where ta.asset_id = assetId and p.id = tp.persona_id and tp.environment_id in (select environment_id from composite_environment where composite_environment_id = environmentId) and tp.task_id = ta.task_id and ta.environment_id = tp.environment_id and ta.asset_id = a.id and ta.environment_id = e.id and ta.environment_id = ea.environment_id and ea.asset_id = assetId
     union
@@ -12396,47 +12571,54 @@ begin
     union
     select 'vulnerability' from_objt, v.name from_name, 'risk' to_objt, r.name to_name from risk r, vulnerability v, vulnerability_severity vs, environment_threat et where r.vulnerability_id = v.id and v.id = vs.vulnerability_id and vs.environment_id = environmentId and r.threat_id = et.threat_id and et.environment_id = environmentId and r.id = riskId
     union
-    select 'risk' from_objt, ri.name from_name, 'response' to_objt, re.name to_name from response re, risk ri,environment_response er where er.environment_id = environmentId and er.response_id = re.id and re.risk_id = ri.id and ri.id = riskId
-    union
-    select 'risk' from_objt, r.name from_name, 'misusecase' to_objt, m.name to_name from risk r, misusecase m, misusecase_risk mr, environment_misusecase em where em.environment_id = environmentId and em.misusecase_id = mr.misusecase_id and mr.misusecase_id = m.id and mr.risk_id = r.id and r.id = riskId
+    select 'risk' from_objt, ri.name from_name, 'response' to_objt, re.name to_name from response re, risk ri,environment_response er, environment_risk eri where eri.environment_id = environmentId and eri.environment_id = er.environment_id and eri.id = re.risk_id and er.response_id = re.id and re.risk_id = ri.id and ri.id = riskId
     union
     select 'task' from_objt, t.name from_name, 'vulnerability' to_objt, v.name to_name from task_vulnerability tv, environment_vulnerability ev, environment_task et, vulnerability v, task t, risk r where ev.environment_id = environmentId and et.environment_id = environmentId and et.task_id = tv.task_id and tv.task_id = t.id and ev.vulnerability_id = tv.vulnerability_id and tv.vulnerability_id = v.id and v.id = r.vulnerability_id and r.id = riskId
     union
+    select 'risk' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name from risk_vulnerability rv, environment_vulnerability ev, environment_risk er, vulnerability v, risk r where ev.environment_id = environmentId and er.environment_id = environmentId and er.id = rv.risk_id and rv.risk_id = r.id and ev.vulnerability_id = rv.vulnerability_id and rv.vulnerability_id = v.id and v.id = r.vulnerability_id and r.id = riskId
+    union
+    select 'risk' from_objt, r.name from_name, 'threat' to_objt, t.name to_name from risk_threat rt, environment_threat et, environment_risk er, threat t, risk r where et.environment_id = environmentId and er.environment_id = environmentId and er.id = rt.risk_id and rt.risk_id = r.id and et.threat_id = rt.threat_id and rt.threat_id = t.id and t.id = r.threat_id and r.id = riskId
+    union
     select 'role' from_objt, ro.name from_name, 'response' to_objt, re.name to_name from responserole_goalassociation rr, response re, role ro, risk r where rr.environment_id = environmentId and rr.goal_id = re.id and rr.subgoal_id = ro.id and re.risk_id = r.id and r.id = riskId
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'vulnerability' to_objt, v.name to_name from requirement r, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv,asset rm, asset_requirement rmr, risk ri where cv.environment_id = environmentId and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = rmr.requirement_id and rmr.asset_id = rm.id and v.id = ri.vulnerability_id and ri.id = riskId
+    select 'requirement' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name from requirement r, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv,asset rm, asset_requirement rmr, risk ri where cv.environment_id = environmentId and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = rmr.requirement_id and rmr.asset_id = rm.id and v.id = ri.vulnerability_id and ri.id = riskId
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'vulnerability' to_objt, v.name to_name from requirement r, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv,environment rm, environment_requirement rmr, risk ri where cv.environment_id = environmentId and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = rmr.requirement_id and rmr.environment_id = rm.id and v.id = ri.vulnerability_id and ri.id = riskId
+    select 'requirement' from_objt, r.name from_name, 'vulnerability' to_objt, v.name to_name from requirement r, vulnerability v, environment_vulnerability cv, requirement_vulnerability rv,environment rm, environment_requirement rmr, risk ri where cv.environment_id = environmentId and rv.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rv.vulnerability_id = v.id and v.id = cv.vulnerability_id and r.id = rmr.requirement_id and rmr.environment_id = rm.id and v.id = ri.vulnerability_id and ri.id = riskId
     union
     select 'obstacle' from_objt, o.name from_name, 'threat' to_objt, t.name to_name from obstacle o, threat t, risk r, obstaclethreat_goalassociation ot, environment_threat et where ot.goal_id = o.id and ot.subgoal_id = t.id and ot.subgoal_id = et.threat_id and et.environment_id = environmentId and et.environment_id = ot.environment_id and ot.subgoal_id = r.threat_id and r.id = riskId
     union
     select 'obstacle' from_objt, o.name from_name, 'vulnerability' to_objt, v.name to_name from obstacle o, vulnerability v, obstaclevulnerability_goalassociation ov, environment_vulnerability ev, risk r where ov.goal_id = o.id and ov.subgoal_id = v.id and ov.subgoal_id = ev.vulnerability_id and ev.environment_id = environmentId and ev.environment_id = ov.environment_id and ov.subgoal_id = r.vulnerability_id and r.id = riskId
     union
-    select 'asset' from_objt, a.name from_name, 'requirement' to_objt, concat(a.short_code,'-',r.label) to_name from asset a, environment_asset ea, requirement r, asset_requirement ar, asset_threat at, risk ri where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and ea.asset_id = at.asset_id and ea.environment_id = at.environment_id and at.threat_id = ri.threat_id and ri.id = riskId
+    select 'asset' from_objt, a.name from_name, 'requirement' to_objt, r.name to_name from asset a, environment_asset ea, requirement r, asset_requirement ar, asset_threat at, risk ri where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and ea.asset_id = at.asset_id and ea.environment_id = at.environment_id and at.threat_id = ri.threat_id and ri.id = riskId
     union
-    select 'asset' from_objt, a.name from_name, 'requirement' to_objt, concat(a.short_code,'-',r.label) to_name from asset a, environment_asset ea, requirement r, asset_requirement ar, asset_vulnerability av, risk ri where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and ea.asset_id = av.asset_id and ea.environment_id = av.environment_id and av.vulnerability_id = ri.vulnerability_id and ri.id = riskId
+    select 'asset' from_objt, a.name from_name, 'requirement' to_objt, r.name to_name from asset a, environment_asset ea, requirement r, asset_requirement ar, asset_vulnerability av, risk ri where ea.environment_id = environmentId and ea.asset_id = a.id and a.id = ar.asset_id and ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and ea.asset_id = av.asset_id and ea.environment_id = av.environment_id and av.vulnerability_id = ri.vulnerability_id and ri.id = riskId
     union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a, risk ri where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id and ctrt.threat_id = ri.threat_id and ri.id = riskId and ri.id = r.risk_id
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a, risk ri where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id and ctrt.threat_id = ri.threat_id and ri.id = riskId and ri.id = r.risk_id
     union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a, risk ri where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id and ctrt.threat_id = ri.threat_id and ri.id = riskId and ri.id = r.risk_id
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_threat_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a, risk ri where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id and ctrt.threat_id = ri.threat_id and ri.id = riskId and ri.id = r.risk_id
     union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a, risk ri where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id and ctrt.vulnerability_id = ri.vulnerability_id and ri.id = riskId and ri.id = r.risk_id
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, asset_requirement ar, asset a, risk ri where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.asset_id = a.id and ctrt.vulnerability_id = ri.vulnerability_id and ri.id = riskId and ri.id = r.risk_id
     union
-    select 'response' from_objt, r.name from_name, 'requirement' to_objt, concat(a.short_code,'-',re.label) to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a, risk ri where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id and ctrt.vulnerability_id = ri.vulnerability_id and ri.id = riskId and ri.id = r.risk_id
+    select 'response' from_objt, r.name from_name, 'requirement' to_objt, re.name to_name from response r, environment_response er, countermeasure_vulnerability_response_target ctrt, requirement_countermeasure rc, requirement re, environment_requirement ar, environment a, risk ri where er.environment_id = environmentId and er.response_id = r.id and er.environment_id = ctrt.environment_id and er.response_id = ctrt.response_id and ctrt.countermeasure_id = rc.countermeasure_id and ctrt.environment_id = rc.environment_id and rc.requirement_id = re.id and re.version = (select max(i.version) from requirement i where i.id = re.id) and re.id = ar.requirement_id and ar.environment_id = a.id and ctrt.vulnerability_id = ri.vulnerability_id and ri.id = riskId and ri.id = r.risk_id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,asset_requirement rmr,asset rm, countermeasure_vulnerability_response_target cvrt, risk ri, response res where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id and rc.countermeasure_id = cvrt.countermeasure_id and rc.environment_id = cvrt.environment_id and cvrt.vulnerability_id = ri.vulnerability_id and ri.id = riskId and cvrt.response_id = res.id and res.risk_id = ri.id
+    select 'requirement' from_objt, r.name from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,asset_requirement rmr,asset rm, countermeasure_vulnerability_response_target cvrt, risk ri, response res where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id and rc.countermeasure_id = cvrt.countermeasure_id and rc.environment_id = cvrt.environment_id and cvrt.vulnerability_id = ri.vulnerability_id and ri.id = riskId and cvrt.response_id = res.id and res.risk_id = ri.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,asset_requirement rmr,asset rm, countermeasure_threat_response_target ctrt, risk ri, response res where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id and rc.countermeasure_id = ctrt.countermeasure_id and rc.environment_id = ctrt.environment_id and ctrt.threat_id = ri.threat_id and ri.id = riskId and ctrt.response_id = res.id and res.risk_id = ri.id
+    select 'requirement' from_objt, r.name from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,asset_requirement rmr,asset rm, countermeasure_threat_response_target ctrt, risk ri, response res where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.asset_id = rm.id and rc.countermeasure_id = ctrt.countermeasure_id and rc.environment_id = ctrt.environment_id and ctrt.threat_id = ri.threat_id and ri.id = riskId and ctrt.response_id = res.id and res.risk_id = ri.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,environment_requirement rmr,environment rm, countermeasure_vulnerability_response_target cvrt, risk ri, response res where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id and rc.countermeasure_id = cvrt.countermeasure_id and rc.environment_id = cvrt.environment_id and cvrt.vulnerability_id = ri.vulnerability_id and ri.id = riskId and cvrt.response_id = res.id and res.risk_id = ri.id
+    select 'requirement' from_objt, r.name from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,environment_requirement rmr,environment rm, countermeasure_vulnerability_response_target cvrt, risk ri, response res where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id and rc.countermeasure_id = cvrt.countermeasure_id and rc.environment_id = cvrt.environment_id and cvrt.vulnerability_id = ri.vulnerability_id and ri.id = riskId and cvrt.response_id = res.id and res.risk_id = ri.id
     union
-    select 'requirement' from_objt, concat(rm.short_code,'-',r.label) from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,environment_requirement rmr,environment rm, countermeasure_threat_response_target ctrt, risk ri, response res where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id and rc.countermeasure_id = ctrt.countermeasure_id and rc.environment_id = ctrt.environment_id and ctrt.threat_id = ri.threat_id and ri.id = riskId and ctrt.response_id = res.id and res.risk_id = ri.id
+    select 'requirement' from_objt, r.name from_name, 'countermeasure' to_objt, c.name to_name from requirement r, countermeasure c, requirement_countermeasure rc,environment_requirement rmr,environment rm, countermeasure_threat_response_target ctrt, risk ri, response res where rc.environment_id = environmentId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.countermeasure_id = c.id and r.id = rmr.requirement_id and rmr.environment_id = rm.id and rc.countermeasure_id = ctrt.countermeasure_id and rc.environment_id = ctrt.environment_id and ctrt.threat_id = ri.threat_id and ri.id = riskId and ctrt.response_id = res.id and res.risk_id = ri.id
     union
     select 'countermeasure' from_objt, c.name from_name, 'role' from_objt, r.name to_name from countermeasure_role cr, countermeasure c, role r, countermeasure_vulnerability_response_target cvrt, risk ri, response res where cr.environment_id = environmentId and cr.countermeasure_id = c.id and cr.role_id = r.id and cr.countermeasure_id = cvrt.countermeasure_id and cr.environment_id = cvrt.environment_id and cvrt.vulnerability_id = ri.vulnerability_id and ri.id = riskId and cvrt.response_id = res.id and res.risk_id = ri.id
     union
     select 'countermeasure' from_objt, c.name from_name, 'role' from_objt, r.name to_name from countermeasure_role cr, countermeasure c, role r, countermeasure_threat_response_target ctrt, risk ri, response res where cr.environment_id = environmentId and cr.countermeasure_id = c.id and cr.role_id = r.id and cr.countermeasure_id = ctrt.countermeasure_id and cr.environment_id = ctrt.environment_id and ctrt.threat_id = ri.threat_id and ri.id = riskId and ctrt.response_id = res.id and res.risk_id = ri.id
     union
-    select 'role' from_objt, r.name from_name, 'attacker' to_objt, a.name to_name from attacker_role ar, attacker a, role r, threat_attacker ta, risk ri where ar.environment_id = environmentId and ar.attacker_id = a.id and ar.role_id = r.id and ar.attacker_id = ta.attacker_id and ar.environment_id = ta.environment_id and ta.threat_id = ri.threat_id and ri.id = riskId;
+    select 'role' from_objt, r.name from_name, 'attacker' to_objt, a.name to_name from attacker_role ar, attacker a, role r, threat_attacker ta, risk ri where ar.environment_id = environmentId and ar.attacker_id = a.id and ar.role_id = r.id and ar.attacker_id = ta.attacker_id and ar.environment_id = ta.environment_id and ta.threat_id = ri.threat_id and ri.id = riskId
+    union
+    select 'risk' from_objt, r2.name from_name, 'vulnerability' to_objt, v.name to_name from risk r, vulnerability v, risk_vulnerability rv, risk r2, environment_risk er, environment_vulnerability ev where r.id = riskId and r.vulnerability_id = ev.vulnerability_id and ev.environment_id = environmentId and ev.vulnerability_id = v.id and ev.vulnerability_id and ev.environment_id = er.environment_id and er.id = r2.id and r2.id = rv.risk_id and rv.vulnerability_id = v.id
+    union
+    select 'risk' from_objt, r2.name from_name, 'threat' to_objt, t.name to_name from risk r, threat t, risk_threat rt, risk r2, environment_risk er, environment_threat et where r.id = riskId and r.threat_id = et.threat_id and et.environment_id = environmentId and et.threat_id = t.id and et.threat_id and et.environment_id = er.environment_id and er.id = r2.id and r2.id = rt.risk_id and rt.threat_id = t.id;
+
   else
     select 0;
   end if;
@@ -12501,7 +12683,7 @@ begin
   declare unoRationale varchar(4000);
   declare vulId int;
   declare vulName varchar(200);
-  declare vulDesc varchar(500);
+  declare vulDesc varchar(4000);
   declare vulType varchar(100);
   declare vulCount int default 0;
   declare attackerId int;
@@ -12552,18 +12734,18 @@ begin
   declare attackerEnvCursor cursor for select ea.environment_id,e.name from environment_attacker ea, environment e where ea.attacker_id = attackerId and ea.environment_id = e.id;
   declare threatEnvCursor cursor for select et.environment_id,e.name from environment_threat et, environment e where et.threat_id = threatId and et.environment_id = e.id;
   declare responseEnvCursor cursor for select er.environment_id,e.name from environment_response er, environment e where er.response_id = responseId and er.environment_id = e.id;
-  declare assetCursor cursor for select a.id,a.name,a.short_code,a.description,a.significance,at.name,a.is_critical,ifnull(a.critical_rationale,'None') from asset a,asset_type at where a.asset_type_id = at.id;
-  declare vulCursor cursor for select v.id,v.name,v.description,vt.name from vulnerability v,vulnerability_type vt where v.vulnerability_type_id = vt.id;
-  declare attackerCursor cursor for select id,name,description,image from attacker;
+  declare assetCursor cursor for select a.id,a.name,xmlEscaped(a.short_code),xmlEscaped(a.description),xmlEscaped(a.significance),at.name,a.is_critical,ifnull(xmlEscaped(a.critical_rationale),'None') from asset a,asset_type at where a.asset_type_id = at.id;
+  declare vulCursor cursor for select v.id,v.name,xmlEscaped(v.description),vt.name from vulnerability v,vulnerability_type vt where v.vulnerability_type_id = vt.id;
+  declare attackerCursor cursor for select id,name,xmlEscaped(description),image from attacker;
   declare attackerRolesCursor cursor for select r.name from attacker_role ar, role r where ar.attacker_id = attackerId and ar.environment_id = envId and ar.role_id = r.id;
   declare motivCursor cursor for select m.name from attacker_motivation am, motivation m where am.attacker_id = attackerId and am.environment_id = envId and am.motivation_id = m.id;
   declare capabilityCursor cursor for select c.name,cv.name from attacker_capability ac, capability c, capability_value cv where ac.attacker_id = attackerId and ac.environment_id = envId and ac.capability_id = c.id and ac.capability_value_id = cv.id;
   declare vulAssetsCursor cursor for select a.name from asset a, asset_vulnerability av where av.vulnerability_id = vulId and av.environment_id = envId and av.asset_id = a.id;
-  declare threatCursor cursor for select t.id, t.name, tt.name, t.method from threat t, threat_type tt where t.threat_type_id = tt.id;
+  declare threatCursor cursor for select t.id, t.name, tt.name, xmlEscaped(t.method) from threat t, threat_type tt where t.threat_type_id = tt.id;
   declare threatAttackerCursor cursor for select a.name from threat_attacker ta, attacker a where ta.threat_id = threatId and ta.environment_id = envId and ta.attacker_id = a.id;
   declare threatAssetCursor cursor for select a.name from asset a, asset_threat at where at.threat_id = threatId and at.asset_id = a.id and at.environment_id = envId;
   declare riskCursor cursor for select r.id, r.name,t.name,v.name from risk r, threat t, vulnerability v where r.threat_id = t.id and r.vulnerability_id = v.id;
-  declare mcCursor cursor for select e.name,mn.narrative from misusecase_risk mr, misusecase_narrative mn, environment e where mr.risk_id = riskId and mr.misusecase_id = mn.misusecase_id and mn.environment_id = e.id;
+  declare mcCursor cursor for select e.name,xmlEscaped(mn.narrative) from misusecase_risk mr, misusecase_narrative mn, environment e where mr.risk_id = riskId and mr.misusecase_id = mn.misusecase_id and mn.environment_id = e.id;
   declare responseCursor cursor for select re.id,re.name,rt.name,r.name from response re,goal_category_type rt, risk r where re.goal_category_type_id = rt.id and re.risk_id = r.id;
   declare responseRoleCursor cursor for select r.name,c.name from responserole_goalassociation rr, role r, cost c where rr.goal_id = responseId and rr.environment_id = envId and rr.subgoal_id = r.id and rr.cost_id = c.id;
   declare detMechCursor cursor for select a.name from asset a, reaction_detection_mechanism rdm where rdm.response_id = responseId and rdm.environment_id = envId and rdm.asset_id = a.id;
@@ -13080,6 +13262,7 @@ end
 
 create procedure goalsToXml(in includeHeader int)
 begin
+  declare dpId int;
   declare dpName varchar(255);
   declare dpDesc varchar(1000);
   declare dpType varchar(50);
@@ -13087,10 +13270,10 @@ begin
   declare dpCount int default 0;
   declare goalId int;
   declare goalName varchar(100);
-  declare goalOrig varchar(50);
+  declare goalOrig varchar(100);
   declare obsId int;
   declare obsName varchar(100);
-  declare obsOrig varchar(50);
+  declare obsOrig varchar(100);
   declare envId int;
   declare envName varchar(50);
   declare concernName varchar(50);
@@ -13110,7 +13293,7 @@ begin
   declare reqFc longtext;
   declare reqOrig longtext;
   declare ucId int;
-  declare ucName varchar(50);
+  declare ucName varchar(200);
   declare ucAuthor varchar(255);
   declare ucShortCode varchar(100);
   declare ucDesc varchar(2000);
@@ -13130,7 +13313,7 @@ begin
   declare cmType varchar(50);
   declare effValue varchar(50);
   declare roleName varchar(50);
-  declare taskName varchar(50);
+  declare taskName varchar(200);
   declare personaName varchar(50);
   declare durValue varchar(50);
   declare freqValue varchar(50);
@@ -13163,32 +13346,36 @@ begin
   declare tagName varchar(255);
   declare buf LONGTEXT default '<?xml version="1.0"?>\n<!DOCTYPE goals PUBLIC "-//CAIRIS//DTD REQUIREMENTS 1.0//EN" "http://cairis.org/dtd/goals.dtd">\n\n<goals>\n';
   declare done int default 0;
-  declare dpCursor cursor for select dp.name,dp.description,dpt.name,dp.originator from domainproperty dp, domainproperty_type dpt where dp.domainproperty_type_id = dpt.id;
-  declare goalCursor cursor for select id,name,originator from goal;
+  declare dpCursor cursor for select dp.id, dp.name,xmlEscaped(dp.description),dpt.name,dp.originator from domainproperty dp, domainproperty_type dpt where dp.domainproperty_type_id = dpt.id;
+  declare dpTagCursor cursor for select t.name from domainproperty_tag dt, tag t where dt.domainproperty_id = dpId and dt.tag_id = t.id;
+  declare goalCursor cursor for select id,name,xmlEscaped(originator) from goal;
+  declare goalTagCursor cursor for select t.name from goal_tag gt, tag t where gt.goal_id = goalId and gt.tag_id = t.id;
   declare goalEnvCursor cursor for select eg.environment_id,e.name from environment_goal eg, environment e where eg.goal_id = goalId and eg.environment_id = e.id;
   declare goalConcernCursor cursor for select a.name from goal_concern gc, asset a where gc.goal_id = goalId and gc.environment_id = envId and gc.asset_id = a.id;
   declare goalConcernAssocCursor cursor for select sa.name,smt.name,ca.link,ta.name,tmt.name from goal_concernassociation ca, asset sa, asset ta, multiplicity_type smt, multiplicity_type tmt where ca.goal_id = goalId and ca.environment_id = envId and ca.source_id = sa.id and ca.source_multiplicity_id = smt.id and ca.target_id = ta.id and ca.target_multiplicity_id = tmt.id;
   declare obsCursor cursor for select id,name,originator from obstacle;
+  declare obsTagCursor cursor for select t.name from obstacle_tag ot, tag t where ot.obstacle_id = obsId and ot.tag_id = t.id;
   declare obsEnvCursor cursor for select eo.environment_id,e.name from environment_obstacle eo, environment e where eo.obstacle_id = obsId and eo.environment_id = e.id;
   declare obsConcernCursor cursor for select a.name from obstacle_concern oc, asset a where oc.obstacle_id = obsId and oc.environment_id = envId and oc.asset_id = a.id;
   declare reqCursor cursor for
-    select a.name,'asset',o.label,rt.name,o.priority,o.name,o.description,o.rationale,o.fit_criterion,o.originator from requirement o, asset_requirement ar, asset a, requirement_type rt where o.version = (select max(i.version) from requirement i where i.id = o.id) and o.type = rt.id and o.id = ar.requirement_id and ar.asset_id = a.id 
+    select a.name,'asset',o.label,rt.name,o.priority,o.name,xmlEscaped(o.description),xmlEscaped(o.rationale),xmlEscaped(o.fit_criterion),xmlEscaped(o.originator) from requirement o, asset_requirement ar, asset a, requirement_type rt where o.version = (select max(i.version) from requirement i where i.id = o.id) and o.type = rt.id and o.id = ar.requirement_id and ar.asset_id = a.id 
     union
-    select e.name,'environment',o.label,rt.name,o.priority,o.name,o.description,o.rationale,o.fit_criterion,o.originator from requirement o, environment_requirement er, environment e, requirement_type rt where o.version = (select max(i.version) from requirement i where i.id = o.id) and o.type = rt.id and o.id = er.requirement_id and er.environment_id = e.id; 
-  declare ucCursor cursor for select id,name,author,short_code,description from usecase;
+    select e.name,'environment',o.label,rt.name,o.priority,o.name,xmlEscaped(o.description),xmlEscaped(o.rationale),xmlEscaped(o.fit_criterion),xmlEscaped(o.originator) from requirement o, environment_requirement er, environment e, requirement_type rt where o.version = (select max(i.version) from requirement i where i.id = o.id) and o.type = rt.id and o.id = er.requirement_id and er.environment_id = e.id; 
+  declare ucCursor cursor for select id,name,xmlEscaped(author),xmlEscaped(short_code),xmlEscaped(description) from usecase;
+  declare ucTagCursor cursor for select t.name from usecase_tag ut, tag t where ut.usecase_id = ucId and ut.tag_id = t.id;
   declare ucEnvCursor cursor for select eu.environment_id,e.name from environment_usecase eu, environment e where eu.usecase_id = ucId and eu.environment_id = e.id;
   declare ucActorCursor cursor for select r.name from usecase_role ur, role r where ur.usecase_id = ucId and ur.role_id = r.id;
-  declare ucStepCursor cursor for select step_no,description from usecase_step where usecase_id = ucId and environment_id = envId order by 1;
+  declare ucStepCursor cursor for select step_no,xmlEscaped(description) from usecase_step where usecase_id = ucId and environment_id = envId order by 1;
   declare ucStepExceptionCursor cursor for
-    select usne.name, 'None', 'None', 'None', usne.description from usecase_step_none_exception usne where usne.usecase_id = ucId and usne.environment_id = envId and usne.step_no = stepNo
+    select usne.name, 'None', 'None', 'None', xmlEscaped(usne.description) from usecase_step_none_exception usne where usne.usecase_id = ucId and usne.environment_id = envId and usne.step_no = stepNo
     union
-    select usge.name, 'Goal', g.name, oct.name, usge.description from usecase_step_goal_exception usge, goal g, obstacle_category_type oct where usge.usecase_id = ucId and usge.environment_id = envId and usge.step_no = stepNo and usge.goal_id = g.id and usge.category_type_id = oct.id
+    select usge.name, 'Goal', g.name, oct.name, xmlEscaped(usge.description) from usecase_step_goal_exception usge, goal g, obstacle_category_type oct where usge.usecase_id = ucId and usge.environment_id = envId and usge.step_no = stepNo and usge.goal_id = g.id and usge.category_type_id = oct.id
     union
-    select usge.name, 'Requirement', concat(a.short_code,'-',r.label), oct.name, usge.description from usecase_step_requirement_exception usge, requirement r, asset_requirement ar, asset a, obstacle_category_type oct where usge.usecase_id = ucId and usge.environment_id = envId and usge.step_no = stepNo and usge.goal_id = r.id and r.id = ar.requirement_id and ar.asset_id = a.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and usge.category_type_id = oct.id
+    select usge.name, 'Requirement', r.name, oct.name, xmlEscaped(usge.description) from usecase_step_requirement_exception usge, requirement r, asset_requirement ar, asset a, obstacle_category_type oct where usge.usecase_id = ucId and usge.environment_id = envId and usge.step_no = stepNo and usge.goal_id = r.id and r.id = ar.requirement_id and ar.asset_id = a.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and usge.category_type_id = oct.id
     union
-    select usge.name, 'Requirement', concat(e.short_code,'-',r.label), oct.name, usge.description from usecase_step_requirement_exception usge, requirement r, environment_requirement er, environment e, obstacle_category_type oct where usge.usecase_id = ucId and usge.environment_id = envId and usge.step_no = stepNo and usge.goal_id = r.id and r.id = er.requirement_id and er.environment_id = e.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and usge.category_type_id = oct.id;
+    select usge.name, 'Requirement', r.name, oct.name, xmlEscaped(usge.description) from usecase_step_requirement_exception usge, requirement r, environment_requirement er, environment e, obstacle_category_type oct where usge.usecase_id = ucId and usge.environment_id = envId and usge.step_no = stepNo and usge.goal_id = r.id and r.id = er.requirement_id and er.environment_id = e.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and usge.category_type_id = oct.id;
   declare ucStepTagCursor cursor for select t.name from usecase_step_tag ust, tag t where ust.usecase_id = ucId and ust.environment_id = envId and ust.step_no = stepNo and ust.tag_id = t.id order by 1;
-  declare cmCursor cursor for select c.id,c.name,c.description,at.name from countermeasure c,asset_type at where c.countermeasure_type_id = at.id;
+  declare cmCursor cursor for select c.id,c.name,xmlEscaped(c.description),at.name from countermeasure c,asset_type at where c.countermeasure_type_id = at.id;
   declare cmEnvCursor cursor for select ec.environment_id,e.name from environment_countermeasure ec, environment e where ec.countermeasure_id = cmId and ec.environment_id = e.id;
   declare cmReqsCursor cursor for
     select distinct r.name from requirement_countermeasure rc, requirement r where rc.countermeasure_id = cmId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.environment_id = envId;
@@ -13215,12 +13402,27 @@ begin
 
   open dpCursor;
   dp_loop: loop
-    fetch dpCursor into dpName, dpDesc, dpType,dpOrig;
+    fetch dpCursor into dpId,dpName, dpDesc, dpType,dpOrig;
     if done = 1
     then
       leave dp_loop;
     end if;
-    set buf = concat(buf,'<domainproperty name=\"',dpName,'\" type=\"',dpType,'\" originator=\"',dpOrig,'\" >\n  <definition>',dpDesc,'</definition>\n</domainproperty>\n');
+    set buf = concat(buf,'<domainproperty name=\"',dpName,'\" type=\"',dpType,'\" originator=\"',dpOrig,'\" >\n');
+
+    open dpTagCursor;
+    dpTag_loop: loop
+      fetch dpTagCursor into tagName;
+      if done = 1
+      then
+        leave dpTag_loop;
+      end if;
+      set buf = concat(buf,'  <tag name=\"',tagName,'\" />\n'); 
+    end loop dpTag_loop;
+    close dpTagCursor;
+    set done = 0;
+
+    set buf = concat(buf,'  <definition>',dpDesc,'</definition>\n</domainproperty>\n');
+
     set dpCount = dpCount + 1;
   end loop dp_loop;
   close dpCursor;
@@ -13236,6 +13438,18 @@ begin
     set buf = concat(buf,'<goal name=\"',goalName,'\" originator=\"',goalOrig,'\">\n');
     set goalCount = goalCount + 1;
 
+    open goalTagCursor;
+    goalTag_loop: loop
+      fetch goalTagCursor into tagName;
+      if done = 1
+      then
+        leave goalTag_loop;
+      end if;
+      set buf = concat(buf,'  <tag name=\"',tagName,'\" />\n'); 
+    end loop goalTag_loop;
+    close goalTagCursor;
+    set done = 0;
+
     open goalEnvCursor;
     goalEnv_loop: loop
       fetch goalEnvCursor into envId, envName;
@@ -13243,7 +13457,7 @@ begin
       then
         leave goalEnv_loop;
       end if;
-      set buf = concat(buf,'  <goal_environment name=\"',envName,'\" category=\"',goal_category(goalId,envId),'\" priority=\"',goal_priority(goalId,envId),'\" >\n    <definition>',goal_definition(goalId,envId),'</definition>\n    <fit_criterion>',goal_fitcriterion(goalId,envId),'</fit_criterion>\n    <issue>',goal_issue(goalId,envId),'</issue>\n');
+      set buf = concat(buf,'  <goal_environment name=\"',envName,'\" category=\"',goal_category(goalId,envId),'\" priority=\"',goal_priority(goalId,envId),'\" >\n    <definition>',xmlEscaped(goal_definition(goalId,envId)),'</definition>\n    <fit_criterion>',xmlEscaped(goal_fitcriterion(goalId,envId)),'</fit_criterion>\n    <issue>',goal_issue(goalId,envId),'</issue>\n');
 
       open goalConcernCursor;
       goalConcern_loop: loop
@@ -13290,6 +13504,18 @@ begin
     set buf = concat(buf,'<obstacle name=\"',obsName,'\" originator=\"',obsOrig,'\" >\n');
     set obsCount = obsCount + 1;
 
+    open obsTagCursor;
+    obsTag_loop: loop
+      fetch obsTagCursor into tagName;
+      if done = 1
+      then
+        leave obsTag_loop;
+      end if;
+      set buf = concat(buf,'  <tag name=\"',tagName,'\" />\n'); 
+    end loop obsTag_loop;
+    close obsTagCursor;
+    set done = 0;
+
     open obsEnvCursor;
     obsEnv_loop: loop
       fetch obsEnvCursor into envId, envName;
@@ -13297,7 +13523,7 @@ begin
       then
         leave obsEnv_loop;
       end if;
-      set buf = concat(buf,'  <obstacle_environment name=\"',envName,'\" category=\"',replace(obstacle_category(obsId,envId),' ','_'),'\" >\n    <definition>',obstacle_definition(obsId,envId),'</definition>\n');
+      set buf = concat(buf,'  <obstacle_environment name=\"',envName,'\" category=\"',replace(obstacle_category(obsId,envId),' ','_'),'\" >\n    <definition>',xmlEscaped(obstacle_definition(obsId,envId)),'</definition>\n');
 
       open obsConcernCursor;
       obsConcern_loop: loop
@@ -13347,6 +13573,18 @@ begin
     end if;
     set buf = concat(buf,'<usecase name=\"',ucName,'\" author=\"',ucAuthor,'\" code=\"',ucShortCode,'\" >\n  <description>',ucDesc,'</description>\n');
     set ucCount = ucCount + 1;
+
+    open ucTagCursor;
+    ucTag_loop: loop
+      fetch ucTagCursor into tagName;
+      if done = 1
+      then
+        leave ucTag_loop;
+      end if;
+      set buf = concat(buf,'  <tag name=\"',tagName,'\" />\n'); 
+    end loop ucTag_loop;
+    close ucTagCursor;
+    set done = 0;
 
     open ucActorCursor;
     ucActor_loop: loop
@@ -13420,6 +13658,8 @@ begin
     set buf = concat(buf,'</usecase>\n');
   end loop uc_loop;
   close ucCursor;
+
+  set done = 0;
 
   open cmCursor;
   cm_loop: loop
@@ -13614,9 +13854,9 @@ begin
     union
     select 'usecase',xmlEscaped(cr.name),c.name from task_characteristic_usecase pc, usecase_reference cr, usecase c where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.usecase_id = c.id and pc.characteristic_reference_type_id = 0
     union
-    select 'requirement',xmlEscaped(cr.name),concat(a.short_code,'-',c.label) from task_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 0 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    select 'requirement',xmlEscaped(cr.name),c.name from task_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 0 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
     union
-    select 'requirement',xmlEscaped(cr.name),concat(e.short_code,'-',c.label) from task_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 0 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id); 
+    select 'requirement',xmlEscaped(cr.name),c.name from task_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 0 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id); 
   declare taskWarrantCursor cursor for
     select 'document',xmlEscaped(dr.name),'' from task_characteristic_document pc, document_reference dr where pc.characteristic_id = tcId and pc.reference_id = dr.id and pc.characteristic_reference_type_id = 1
     union
@@ -13624,9 +13864,9 @@ begin
     union
     select 'usecase',xmlEscaped(cr.name),c.name from task_characteristic_usecase pc, usecase_reference cr, usecase c where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.usecase_id = c.id and pc.characteristic_reference_type_id = 1
     union
-    select 'requirement',xmlEscaped(cr.name),concat(a.short_code,'-',c.label) from task_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 1 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    select 'requirement',xmlEscaped(cr.name),c.name from task_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 1 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
     union
-    select 'requirement',xmlEscaped(cr.name),concat(e.short_code,'-',c.label) from task_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 1 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id); 
+    select 'requirement',xmlEscaped(cr.name),c.name from task_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 1 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id); 
   declare taskRebuttalCursor cursor for
     select 'document',xmlEscaped(dr.name),'' from task_characteristic_document pc, document_reference dr where pc.characteristic_id = tcId and pc.reference_id = dr.id and pc.characteristic_reference_type_id = 2
     union
@@ -13634,9 +13874,9 @@ begin
     union
     select 'usecase',xmlEscaped(cr.name),c.name from task_characteristic_usecase pc, usecase_reference cr, usecase c where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.usecase_id = c.id and pc.characteristic_reference_type_id = 2
     union
-    select 'requirement',xmlEscaped(cr.name),concat(a.short_code,'-',c.label) from task_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 2 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    select 'requirement',xmlEscaped(cr.name),c.name from task_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 2 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
     union
-    select 'requirement',xmlEscaped(cr.name),concat(e.short_code,'-',c.label) from task_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 2 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id); 
+    select 'requirement',xmlEscaped(cr.name),c.name from task_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = tcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 2 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id); 
   declare continue handler for not found set done = 1;
 
   if includeHeader = 0
@@ -13768,7 +14008,7 @@ begin
   declare taskName varchar(200);
   declare taskCode varchar(100);
   declare taskAuthor varchar(255);
-  declare taskObjective varchar(255);
+  declare taskObjective varchar(2000);
   declare isTaskAssumption int;
   declare taskCount int default 0;
   declare durationValue varchar(50);
@@ -13781,6 +14021,7 @@ begin
   declare concernLink varchar(50);
   declare targetNry varchar(10);
   declare targetName varchar(50);
+  declare tagName varchar(255);
 
   declare buf LONGTEXT default '<?xml version="1.0"?>\n<!DOCTYPE usability PUBLIC "-//CAIRIS//DTD USABILITY 1.0//EN" "http://cairis.org/dtd/usability.dtd">\n\n<usability>\n';
   declare done int default 0;
@@ -13812,9 +14053,9 @@ begin
     union
     select 'persona',cr.name,c.name from persona_characteristic_persona pc, persona_reference cr, persona c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.persona_id = c.id and pc.characteristic_reference_type_id = 0
     union
-    select 'requirement',cr.name,concat(a.short_code,'-',c.label) from persona_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 0 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 0 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
     union
-    select 'requirement',cr.name,concat(e.short_code,'-',c.label) from persona_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 0 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 0 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
     union
     select 'response',cr.name,c.name from persona_characteristic_response pc, response_reference cr, response c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.response_id = c.id and pc.characteristic_reference_type_id = 0
     union
@@ -13848,9 +14089,9 @@ begin
     union
     select 'persona',cr.name,c.name from persona_characteristic_persona pc, persona_reference cr, persona c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.persona_id = c.id and pc.characteristic_reference_type_id = 1
     union
-    select 'requirement',cr.name,concat(a.short_code,'-',c.label) from persona_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 1 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 1 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
     union
-    select 'requirement',cr.name,concat(e.short_code,'-',c.label) from persona_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 1 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 1 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
     union
     select 'response',cr.name,c.name from persona_characteristic_response pc, response_reference cr, response c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.response_id = c.id and pc.characteristic_reference_type_id = 1
     union
@@ -13884,9 +14125,9 @@ begin
     union
     select 'persona',cr.name,c.name from persona_characteristic_persona pc, persona_reference cr, persona c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.persona_id = c.id and pc.characteristic_reference_type_id = 2
     union
-    select 'requirement',cr.name,concat(a.short_code,'-',c.label) from persona_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 2 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 2 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
     union
-    select 'requirement',cr.name,concat(e.short_code,'-',c.label) from persona_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 2 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 2 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
     union
     select 'response',cr.name,c.name from persona_characteristic_response pc, response_reference cr, response c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.response_id = c.id and pc.characteristic_reference_type_id = 2
     union
@@ -13900,6 +14141,7 @@ begin
     union
     select 'vulnerability',cr.name,c.name from persona_characteristic_vulnerability pc, vulnerability_reference cr, vulnerability c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.vulnerability_id = c.id and pc.characteristic_reference_type_id = 2;
   declare taskCursor cursor for select id,name,xmlEscaped(short_code),xmlEscaped(author),xmlEscaped(objective),assumption_id from task;
+  declare taskTagCursor cursor for select t.name from task_tag tt, tag t where tt.task_id = taskId and tt.tag_id = t.id;
   declare taskEnvCursor cursor for select et.environment_id,e.name from environment_task et, environment e where et.task_id = taskId and et.environment_id = e.id;  
   declare taskPersonaCursor cursor for select p.name,duv.name,fv.name,dev.name,gv.name from persona p, task_persona tp, security_property_value duv, security_property_value fv, security_property_value dev, security_property_value gv where tp.task_id = taskId and tp.environment_id = envId and tp.persona_id = p.id and tp.duration_id = duv.id and tp.frequency_id = fv.id and tp.demands_id = dev.id and tp.goalsupport_id = gv.id;
   declare taskConcernCursor cursor for select a.name from task_asset tc, asset a where tc.task_id = taskId and tc.environment_id = envId and tc.asset_id = a.id;
@@ -14056,6 +14298,18 @@ begin
     set buf = concat(buf,'<task name=\"',taskName,'\" code=\"',taskCode,'\" author=\"',taskAuthor,'\" assumption_task=\"',b2a(isTaskAssumption),'\" >\n  <objective>',taskObjective,'</objective>\n');
     set taskCount = taskCount + 1; 
 
+    open taskTagCursor;
+    taskTag_loop: loop
+      fetch taskTagCursor into tagName;
+      if done = 1
+      then
+        leave taskTag_loop;
+      end if;
+      set buf = concat(buf,'  <tag name=\"',tagName,'\" />\n'); 
+    end loop taskTag_loop;
+    close taskTagCursor;
+    set done = 0;
+
     open taskEnvCursor;
     taskEnv_loop: loop
       fetch taskEnvCursor into envId,envName;
@@ -14123,9 +14377,9 @@ create procedure associationsToXml(in includeHeader int)
 begin
   declare buf LONGTEXT default '<?xml version="1.0"?>\n<!DOCTYPE associations PUBLIC "-//CAIRIS//DTD ASSOCIATIONS 1.0//EN" "http://cairis.org/dtd/associations.dtd">\n\n<associations>\n';
   declare fromDim varchar(50);
-  declare fromName varchar(50);
+  declare fromName varchar(200);
   declare toDim varchar(50);
-  declare toName varchar(50);
+  declare toName varchar(200);
   declare refType varchar(50);
   declare envName varchar(50);
   declare goalName varchar(100);
@@ -14165,7 +14419,13 @@ begin
     union
     select 'countermeasure', c.name, 'asset', a.name, '' from countermeasure_asset ca, countermeasure c, asset a where ca.countermeasure_id = c.id and ca.asset_id = a.id
     union
-    select 'response', r.name, 'goal', g.name, '' from response_goal rg, response r, goal g where rg.response_id = r.id and rg.goal_id = g.id;
+    select 'risk', r.name, 'vulnerability', v.name, '' from risk_vulnerability rv, vulnerability v, risk r where rv.risk_id = r.id and rv.vulnerability_id = v.id
+    union
+    select 'risk', r.name, 'threat', t.name, '' from risk_threat rt, threat t, risk r where rt.risk_id = r.id and rt.threat_id = t.id
+    union
+    select 'response', r.name, 'goal', g.name, '' from response_goal rg, response r, goal g where rg.response_id = r.id and rg.goal_id = g.id
+    union
+    select 'requirement', fr.name, 'requirement', tr.name, rr.label from requirement_requirement rr, requirement fr, requirement tr where rr.from_id = fr.id and rr.to_id = tr.id;
 
   declare goalAssocCursor cursor for
     select e.name,hg.name,'goal',rt.name,tg.name,'goal',ga.alternative_id,ga.rationale from goalgoal_goalassociation ga, environment e, goal hg, reference_type rt, goal tg where ga.goal_id = hg.id and ga.ref_type_id = rt.id and ga.subgoal_id = tg.id and ga.environment_id = e.id
@@ -14229,6 +14489,9 @@ begin
     if (fromDim = 'requirement' and toDim = 'usecase') or (fromDim = 'requirement' and toDim = 'task')
     then
       set buf = concat(buf,' ref_type=\"',refType,'\"');
+    elseif (fromDim = 'requirement' and toDim = 'requirement')
+    then
+      set buf = concat(buf,' label=\"',refType,'\"');
     end if;
     set buf = concat(buf,' />\n');
     set maCount = maCount + 1;
@@ -17346,7 +17609,7 @@ begin
   declare requirementId int;
   declare requirementLabel int;
   declare taskId int;
-  declare taskName varchar(50);
+  declare taskName varchar(200);
   declare usecaseId int;
   declare usecaseName varchar(50);
   declare roleId int;
@@ -18537,7 +18800,6 @@ begin
   end if;
 
   set addTagSql = concat('insert into ',tagDim,'_tag (',tagDim,'_id, tag_id) values(',dimId,',',tagId,')');
-  select addTagSql;
   set @sql = addTagSql;
   prepare stmt from @sql;
   execute stmt;
@@ -18570,11 +18832,14 @@ begin
   deallocate prepare stmt;
   set dimId = @dimId;
 
-  set deleteTagsSql = concat('delete from ',tagDim,'_tag where ',tagDim,'_id = ',dimId);
-  set @sql = deleteTagsSql;
-  prepare stmt from @sql;
-  execute stmt;
-  deallocate prepare stmt;
+  if dimId is not null
+  then
+    set deleteTagsSql = concat('delete from ',tagDim,'_tag where ',tagDim,'_id = ',dimId);
+    set @sql = deleteTagsSql;
+    prepare stmt from @sql;
+    execute stmt;
+    deallocate prepare stmt;
+  end if;
 end
 //
 
@@ -18856,7 +19121,7 @@ end
 
 create procedure getComponentRequirements(in componentId int)
 begin
-  select tr.name,ctr.label from component_template_requirement ctr, template_requirement tr where ctr.component_id = componentId and ctr.template_requirement_id = tr.id order by 2;
+  select tr.name from component_template_requirement ctr, template_requirement tr where ctr.component_id = componentId and ctr.template_requirement_id = tr.id order by 1;
 end
 //
 
@@ -19033,11 +19298,13 @@ create procedure deleteComponentViewComponents(in cvId int)
 begin
   declare done int default 0;
   declare cId int;
+  declare ncvcCount int default 0;
   declare componentCursor cursor for select component_id from temp_component_id;
   declare continue handler for not found set done = 1;
 
   delete from connector where component_view_id = cvId;
 
+  drop table if exists temp_component_id;
   create temporary table temp_component_id (component_id int);
   insert into temp_component_id select component_id from component_view_component where component_view_id = cvId;
   delete from component_view_component where component_view_id = cvId;
@@ -19049,11 +19316,17 @@ begin
     then
       leave component_loop;
     end if;
-    call delete_component(cId);
+
+    select count(*) into ncvcCount from component_view_component where component_id = cId and component_view_id != cvId;
+    if ncvcCount = 0
+    then
+      call delete_component(cId);
+    end if;
   end loop component_loop;
   close componentCursor;
 
   drop table temp_component_id;
+
 end
 //
 
@@ -19268,7 +19541,7 @@ begin
   then
     select tr.id, tr.name, ta.name, rt.name, tr.description, tr.rationale, tr.fit_criterion from template_requirement tr, template_asset ta, requirement_type rt where tr.type_id = rt.id and tr.asset_id = ta.id;
   else
-    select tr.id, tr.name, ta.name, rt.name, r.description, tr.rationale, tr.fit_criterion from template_requirement tr, template_asset ta, requirement_type rt where tr.id = constraintId and tr.type_id = rt.id and tr.asset_id = ta.id;
+    select tr.id, tr.name, ta.name, rt.name, tr.description, tr.rationale, tr.fit_criterion from template_requirement tr, template_asset ta, requirement_type rt where tr.id = constraintId and tr.type_id = rt.id and tr.asset_id = ta.id;
   end if;
 end
 //
@@ -20405,11 +20678,7 @@ end
 
 create procedure componentGoalAssociations(in cId int)
 begin
-  select hg.name,rt.name,tg.name,ga.rationale from template_goal hg, template_goal tg, reference_type rt, component_goalgoal_goalassociation ga where ga.component_id = cId and ga.goal_id = hg.id and ga.subgoal_id = tg.id and ga.ref_type_id = rt.id
-  union
-  select hg.name,'responsible',tg.name,'None' from template_goal hg, role tg, component_goalgoal_goalassociation ga, template_goal_responsibility tgr where ga.component_id = cId and tgr.template_goal_id = hg.id and tgr.role_id = tg.id and tgr.template_goal_id = ga.goal_id
-  union
-  select hg.name,'responsible',tg.name,'None' from template_goal hg, role tg, component_goalgoal_goalassociation ga, template_goal_responsibility tgr where ga.component_id = cId and tgr.template_goal_id = hg.id and tgr.role_id = tg.id and tgr.template_goal_id = ga.subgoal_id;
+  select hg.name,rt.name,tg.name,ga.rationale from template_goal hg, template_goal tg, reference_type rt, component_goalgoal_goalassociation ga where ga.component_id = cId and ga.goal_id = hg.id and ga.subgoal_id = tg.id and ga.ref_type_id = rt.id;
 end
 //
 
@@ -20457,7 +20726,7 @@ end
 create procedure add_template_goal_responsibility(goalId int, roleName text)
 begin
   declare roleId int;
-  select id into roleId from role where name = roleName;
+  select id into roleId from role where name = roleName limit 1;
   insert into template_goal_responsibility(template_goal_id,role_id) values (goalId,roleId);
 end
 //
@@ -23063,8 +23332,6 @@ begin
     union
     select 'countermeasure',c.name from countermeasure c, environment_countermeasure ec where ec.environment_id = environmentId and ec.countermeasure_id = c.id 
     union
-    select 'misusecase',m.name from misusecase m, environment_misusecase em where em.environment_id = environmentId and em.misusecase_id = m.id
-    union
     select 'obstacle',o.name from obstacle o, environment_obstacle eo where eo.environment_id = environmentId and eo.obstacle_id = o.id
     union
     select 'requirement', concat(a.short_code,'-',r.label) from requirement r, asset_requirement ar, environment_asset ea, asset a where ea.environment_id = environmentId and ea.asset_id = ar.asset_id and ea.asset_id = a.id and  ar.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id)
@@ -23815,17 +24082,51 @@ begin
 end
 //
 
-create procedure addDataFlowAsset(in dfName text, in envName text, in assetName text)
+create procedure addDataFlowAsset(in dfName text, in envName text, in fromType text, in fromName text, in toType text, in toName text, in assetName text)
 begin
   declare dfId int;
+  declare fromId int;
+  declare toId int;
   declare envId int;
   declare assetId int;
+  declare dfaCount int;
 
   select id into envId from environment where name = envName limit 1;
-  select id into dfId from dataflow where name = dfName and environment_id = envId limit 1;
+
+  if fromType = 'process' and toType = 'process'
+  then
+    select id into fromId from usecase where name = fromName limit 1;
+    select id into toId from usecase where name = toName limit 1;
+    select dataflow_id into dfId from dataflow_process_process where from_id = fromId and to_id = toId limit 1;
+  elseif fromType = 'entity' and toType = 'process'
+  then
+    select id into fromId from asset where name = fromName limit 1;
+    select id into toId from usecase where name = toName limit 1;
+    select dataflow_id into dfId from dataflow_entity_process where from_id = fromId and to_id = toId limit 1;
+  elseif fromType = 'process' and toType = 'entity'
+  then
+    select id into fromId from usecase where name = fromName limit 1;
+    select id into toId from asset where name = toName limit 1;
+    select dataflow_id into dfId from dataflow_process_entity where from_id = fromId and to_id = toId limit 1;
+  elseif fromType = 'datastore' and toType = 'process'
+  then
+    select id into fromId from asset where name = fromName limit 1;
+    select id into toId from usecase where name = toName limit 1;
+    select dataflow_id into dfId from dataflow_datastore_process where from_id = fromId and to_id = toId limit 1;
+  elseif fromType = 'process' and toType = 'datastore'
+  then
+    select id into fromId from usecase where name = fromName limit 1;
+    select id into toId from asset where name = toName limit 1;
+    select dataflow_id into dfId from dataflow_process_datastore where from_id = fromId and to_id = toId limit 1;
+  end if; 
+
   select id into assetId from asset where name = assetName limit 1;
 
-  insert into dataflow_asset(dataflow_id,asset_id) values (dfId,assetId);
+  select count(*) into dfaCount from dataflow_asset where dataflow_id = dfId and asset_id = assetId;
+  if dfaCount = 0
+  then
+    insert into dataflow_asset(dataflow_id,asset_id) values (dfId,assetId);
+  end if;
 end
 //
 
@@ -24259,8 +24560,12 @@ begin
   call criticalPrivacyRisks(environmentId);
   call newRiskContexts();
   call unrelatedExceptionCheck(environmentId);
+  call implicitAssetInclusionCheck(environmentId);
+  call implicitAssetVulnerabilityCheck(environmentId);
+  call obstructedTasks(environmentId);
+  call inheritanceInconsistency(environmentId);
 
-  select label,message from temp_vout;
+  select distinct label,message from temp_vout;
 
 end
 //
@@ -24307,7 +24612,7 @@ end
 create procedure lawfulDataHandling_task(in environmentId int)
 begin
   declare taskId int;
-  declare taskName varchar(100);
+  declare taskName varchar(200);
   declare assetId int;
   declare prCount int;
   declare done int default 0;
@@ -24569,7 +24874,7 @@ end
 
 create procedure criticalPrivacyRisks(in environmentId int)
 begin
-  declare riskName varchar(50);
+  declare riskName varchar(200);
   declare threatId int;
   declare vulId int;
   declare assetName varchar(200);
@@ -25114,7 +25419,7 @@ end
 create procedure newRiskContexts()
 begin
   declare riskId int;
-  declare riskName varchar(100);
+  declare riskName varchar(200);
   declare envName varchar(100);
   declare done int default 0;
   declare riskCursor cursor for select id,name from risk; 
@@ -25213,7 +25518,6 @@ begin
   end loop uc_loop;
   close ucCursor;
   set done = 0;
-
 end
 //
 
@@ -25249,6 +25553,7 @@ begin
   declare assetName varchar(200);
   declare piName varchar(1000);
   declare personaName varchar(50);
+  declare linkName varchar(1000);
 
   declare done int default 0;
   declare buf LONGTEXT default '';
@@ -25256,6 +25561,11 @@ begin
   declare locCursor cursor for select id,name from location where locations_id = locsId order by 2;
   declare aiCursor cursor for select ai.name,a.name from asset_instance ai, asset a where location_id = locId and ai.asset_id = a.id order by 1;
   declare piCursor cursor for select pi.name,p.name from persona_instance pi, persona p where location_id = locId and pi.persona_id = p.id order by 1;
+  declare linkCursor cursor for 
+    select l.name from location l, location_link ll where ll.locations_id = locsId and ll.head_location_id != locId and ll.head_location_id = l.id
+    union
+    select l.name from location l, location_link ll where ll.locations_id = locsId and ll.tail_location_id != locId and ll.tail_location_id = l.id;
+
   declare continue handler for not found set done = 1;
 
   open locsCursor;
@@ -25300,6 +25610,18 @@ begin
       end loop pi_loop;
       close piCursor;
       set done = 0;
+
+      open linkCursor;
+      link_loop: loop
+        fetch linkCursor into linkName;
+        if done = 1
+        then
+          leave link_loop;
+        end if;
+        set buf = concat(buf,'    <link name=\"',linkName,'\" />\n');
+      end loop link_loop;
+      close linkCursor;
+      set done = 0;
     
       set buf = concat(buf,'  </location>\n');
     end loop loc_loop;
@@ -25313,5 +25635,3622 @@ begin
 end
 //
 
+create procedure implicitAssetInclusionCheck(in environmentId int)
+begin
+  declare done int default 0;
+  declare cProp int;
+  declare iProp int;
+  declare avProp int;
+  declare acProp int;
+  declare anProp int;
+  declare panProp int;
+  declare unoProp int;
+  declare unlProp int;
+  declare cRationale varchar(4000);
+  declare iRationale varchar(4000);
+  declare avRationale varchar(4000);
+  declare acRationale varchar(4000);
+  declare anRationale varchar(4000);
+  declare panRationale varchar(4000);
+  declare unlRationale varchar(4000);
+  declare unoRationale varchar(4000);
+  declare assetName varchar(200);
+  declare depAsset varchar(200);
+  declare envName varchar(200);
+  declare assocAssets varchar(5000);
+  declare assetId int;
+  declare assetCursor cursor for select ea.asset_id,a.name from environment_asset ea, asset a where ea.environment_id = environmentId and ea.asset_id = a.id;
+  declare depCursor cursor for 
+    select a.name from classassociation ca, asset a where ca.tail_id = assetId and ca.environment_id = environmentId and ca.head_id = a.id 
+    union 
+    select a.name from classassociation ca, asset a where ca.head_id = assetId and ca.environment_id = environmentId and ca.tail_id = a.id;
+  declare continue handler for not found set done = 1;
+
+  select name into envName from environment where id = environmentId limit 1;
+
+  open assetCursor;
+  asset_loop: loop
+    fetch assetCursor into assetId,assetName;
+    if done = 1
+    then
+      leave asset_loop;
+    end if;
+
+    select property_value_id into cProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 0;
+    select property_value_id into iProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 1;
+    select property_value_id into avProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 2;
+    select property_value_id into acProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 3;
+    select property_value_id into anProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 4;
+    select property_value_id into panProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 5;
+    select property_value_id into unlProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 6;
+    select property_value_id into unoProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 7;
+
+    select property_rationale into cRationale from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 0;
+    select property_rationale into iRationale from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 1;
+    select property_rationale into avRationale from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 2;
+    select property_rationale into acRationale from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 3;
+    select property_rationale into anRationale from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 4;
+    select property_rationale into panRationale from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 5;
+    select property_rationale into unlRationale from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 6;
+    select property_rationale into unoRationale from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 7;
+
+    if (cProp = 0 and iProp = 0 and avProp = 0 and acProp = 0 and anProp = 0 and panProp = 0 and unlProp = 0 and unoProp = 0 and cRationale = 'Implicit' and iRationale = 'Implicit' and avRationale = 'Implicit' and acRationale = 'Implicit' and anRationale = 'Implicit' and panRationale = 'Implicit' and unlRationale = 'Implicit' and unoRationale = 'Implicit')
+    then
+      set assocAssets = '';
+      open depCursor;
+      dep_loop: loop
+        fetch depCursor into depAsset;
+        if done = 1
+        then
+          leave dep_loop;
+        end if;
+        set assocAssets = concat(assocAssets,"'",depAsset,"',");
+      end loop dep_loop;
+      close depCursor;
+      set done = 0;
+      insert into temp_vout(label,message) values('Implicit asset inclusion',concat("Asset '",assetName,"' is implicitly present in environment '",envName,"' because it is associated with ",assocAssets," but no security or privacy properties are associated with it"));
+    end if;
+    set done = 0;
+  end loop asset_loop;
+  close assetCursor;
+  set done = 0;
+end
+//
+
+create procedure implicitAssetVulnerabilityCheck(in environmentId int)
+begin
+  declare done int default 0;
+  declare cProp int;
+  declare iProp int;
+  declare avProp int;
+  declare acProp int;
+  declare anProp int;
+  declare panProp int;
+  declare unoProp int;
+  declare unlProp int;
+  declare assetName varchar(200);
+  declare vulName varchar(200);
+  declare envName varchar(200);
+  declare assetVuls varchar(5000);
+  declare assetId int;
+  declare assetCursor cursor for select ea.asset_id,a.name from environment_asset ea, asset a where ea.environment_id = environmentId and ea.asset_id = a.id;
+  declare vulCursor cursor for select distinct v.name from asset_vulnerability av, vulnerability v where av.asset_id = assetId and av.environment_id = environmentId and av.vulnerability_id = v.id order by 1;
+  declare continue handler for not found set done = 1;
+
+  select name into envName from environment where id = environmentId limit 1;
+
+  open assetCursor;
+  asset_loop: loop
+    fetch assetCursor into assetId,assetName;
+    if done = 1
+    then
+      leave asset_loop;
+    end if;
+
+    select property_value_id into cProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 0;
+    select property_value_id into iProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 1;
+    select property_value_id into avProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 2;
+    select property_value_id into acProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 3;
+    select property_value_id into anProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 4;
+    select property_value_id into panProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 5;
+    select property_value_id into unlProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 6;
+    select property_value_id into unoProp from asset_property where asset_id = assetId and environment_id = environmentId and property_id = 7;
+    if (cProp = 0 and iProp = 0 and avProp = 0 and acProp = 0 and anProp = 0 and panProp = 0 and unlProp = 0 and unoProp = 0)
+    then
+      set assetVuls = '';
+      open vulCursor;
+      vul_loop: loop
+        fetch vulCursor into vulName;
+        if done = 1
+        then
+          leave vul_loop;
+        end if;
+        set assetVuls = concat(assetVuls,"'",vulName,"',");
+      end loop vul_loop;
+      close vulCursor;
+      set done = 0;
+      if (assetVuls != '')
+      then
+        insert into temp_vout(label,message) values("Vulnerable non-valued asset",concat("Asset '",assetName,"' is vulnerable to ",assetVuls," but no security or privacy properties are associated with it"));
+        set assetVuls = '';
+      end if;
+    end if;
+    set done = 0;
+  end loop asset_loop;
+  close assetCursor;
+  set done = 0;
+end
+//
+
+create function lastNumericRequirementLabel(modId int,isAsset bool) 
+returns int
+deterministic 
+begin
+  declare reqLabel int;
+
+  if isAsset is True
+  then
+    select ifnull(max(r.label),0) into reqLabel from requirement r, asset_requirement ar where ar.asset_id = modId and r.id = ar.requirement_id and r.version = (select max(i.version) from requirement i where i.id = r.id);
+  else
+    select ifnull(max(r.label),0) into reqLabel from requirement r, environment_requirement er where er.environment_id = modId and r.id = er.requirement_id and r.version = (select max(i.version) from requirement i where i.id = r.id);
+  end if;
+  return reqLabel;
+end
+//
+
+create procedure riskMisuseCaseByTV(in threatName text, in vulName text)
+begin
+  declare threatId int;
+  declare vulId int;
+  declare riskId int;
+
+  select id into threatId from threat where name = threatName limit 1;
+  select id into vulId from vulnerability where name = vulName limit 1;
+
+  select mc.id, mc.name from misusecase mc, misusecase_risk mr, risk r where mr.risk_id = r.id and r.threat_id = threatId and r.vulnerability_id = vulId and mr.misusecase_id = mc.id;
+end
+//
+
+create procedure getDependency(in environmentName text, in dependerName text, in dependeeName text, in dependencyName text)
+begin
+  declare envId int;
+  declare dependerId int;
+  declare dependeeId int;
+  declare goalDependencyId int;
+  declare taskDependencyId int;
+  declare assetDependencyId int;
+
+  select id into envId from environment where name = environmentName limit 1;
+  select id into dependerId from role where name = dependerName limit 1;
+  select id into dependeeId from role where name = dependeeName limit 1;
+
+  select id into goalDependencyId from goal where name = dependencyName;
+  select id into taskDependencyId from task where name = dependencyName;
+  select id into assetDependencyId from asset where name = dependencyName;
+
+  if goalDependencyId is not null
+  then
+    select rgr.id id,e.name environment,dr.name depender,de.name dependee,'goal' dependencyType,g.name dependency,rgr.rationale from rolegoalrole_dependency rgr, role dr, role de, environment e, goal g where rgr.environment_id = envId and rgr.depender_id = dependerId and rgr.dependee_id = dependeeId and rgr.dependency_id = goalDependencyId and rgr.environment_id = e.id and rgr.depender_id = dr.id and rgr.dependee_id = de.id and rgr.dependency_id = g.id;
+  elseif taskDependencyId is not null
+  then
+    select rtr.id id,e.name environment,dr.name depender,de.name dependee,'task' dependencyType,t.name dependency,rtr.rationale from roletaskrole_dependency rtr, role dr, role de, environment e, task t where rtr.environment_id = envId and rtr.depender_id = dependerId and rtr.dependee_id = dependeeId and rtr.dependency_id = taskDependencyId and rtr.environment_id = e.id and rtr.depender_id = dr.id and rtr.dependee_id = de.id and rtr.dependency_id = t.id;
+  elseif assetDependencyId is not null
+  then
+    select rar.id id,e.name environment,dr.name depender,de.name dependee,'asset' dependencyType,a.name dependency,rar.rationale from roleassetrole_dependency rar, role dr, role de, environment e, asset a where rar.environment_id = envId and rar.depender_id = dependerId and rar.dependee_id = dependeeId and rar.dependency_id = assetDependencyId and rar.environment_id = e.id and rar.depender_id = dr.id and rar.dependee_id = de.id and rar.dependency_id = a.id;
+  end if;
+end
+//
+
+create function assetAttackSurface(assetName text, envName text) 
+returns text
+deterministic 
+begin
+  declare assetId int;
+  declare envId int;
+  declare vulId int;
+  declare obsId int;
+  declare asScore int default 0;
+  declare ratingId int;
+  declare mitigatingRatingId int;
+  declare isObstructed bool;
+  declare sevValue varchar(50);
+  declare done int default 0;
+  declare vulCursor cursor for select distinct vulnerability_id from asset_vulnerability where asset_id = assetId and environment_id = envId; 
+  declare continue handler for not found set done = 1;
+
+  select id into assetId from asset where name = assetName limit 1;
+  select id into envId from environment where name = envName limit 1;
+
+  open vulCursor;
+  vul_loop: loop
+    fetch vulCursor into vulId;
+    if done = 1
+    then
+      leave vul_loop;
+    end if;
+    select vulnerability_severity_rating(vulId,envId) into ratingId;
+
+    select max(cvt.effectiveness_id) into mitigatingRatingId from countermeasure_vulnerability_target cvt, risk r, response re where cvt.vulnerability_id = vulId and cvt.environment_id = envId and cvt.vulnerability_id = r.vulnerability_id and r.id = re.risk_id;
+
+    if mitigatingRatingId is null
+    then
+      set mitigatingRatingId = 0;
+
+      /* If we find an obstacle associated with the vulnerability and it isn't obstructed then set the mitigatingRatingId to ratingId to render it negligible */
+      select goal_id into obsId from obstaclevulnerability_goalassociation where subgoal_id = vulId and environment_id = envId;
+      if obsId is not null
+      then
+        call isObstacleObstructed(obsId,envId,isObstructed);
+        if isObstructed != true
+        then
+          set mitigatingRatingId = ratingId;
+        end if;
+      end if;
+    end if;
+
+    set ratingId = ratingId - mitigatingRatingId;
+    if ratingId < 0
+    then
+      set ratingId = 0;
+    end if;
+
+    if ratingId > asScore
+    then
+      set asScore = ratingId;
+    end if;
+  end loop vul_loop;
+  close vulCursor;
+
+  select name into sevValue from severity where id = asScore;
+  return sevValue;
+end
+//
+
+create procedure obstructedGoals(in taskId int, in envId int)
+begin
+  declare goalId int;
+  declare goalCount int default 0;
+  declare isObstructed bool;
+  declare done int default 0;
+  declare rootGoalName varchar(100);
+  declare obsGoalName varchar(100);
+  declare opGoalCursor cursor for select goal_id from goaltask_goalassociation where subgoal_id = taskId and environment_id = envId; 
+  declare obsGoalCursor cursor for select obstructed from temp_obstructed order by 1; 
+  declare continue handler for not found set done = 1;
+
+  drop table if exists temp_goal;
+  drop table if exists temp_obstructed;
+  create temporary table temp_goal (root varchar(100), obstructed varchar(100));
+  create temporary table temp_obstructed (obstructed varchar(100));
+
+  open opGoalCursor;
+  og_loop: loop
+    fetch opGoalCursor into goalId;
+    if done = 1
+    then
+      leave og_loop;
+    end if;
+
+    call isGoalObstructed(goalId,envId,isObstructed);
+    if isObstructed = true
+    then
+      select count(goal_id) into goalCount from goalgoal_goalassociation where subgoal_id = goalId and environment_id = envId;
+      if goalCount = 0
+      then
+        select name into rootGoalName from goal where id = goalId;
+        open obsGoalCursor;
+        obsGoal_loop: loop
+          fetch obsGoalCursor into obsGoalName;
+          if done = 1
+          then
+            leave obsGoal_loop;
+          end if;
+          insert into temp_goal(root,obstructed) values (rootGoalName,obsGoalName); 
+        end loop obsGoal_loop;
+        close obsGoalCursor;
+        set done = 0;
+        delete from temp_obstructed;
+      else
+        call goalRoot(goalId,envId);
+      end if;
+    else
+      call obstructedRootGoals(goalId, envId); 
+    end if;
+  end loop og_loop;
+  close opGoalCursor;
+end
+//
+
+create procedure goalRoot(in goalId int, in envId int)
+begin
+  declare rgId int;
+  declare done int default 0;
+  declare goalCount int default 0;
+  declare rootGoalName varchar(100);
+  declare obsGoalName varchar(100);
+  declare rootGoalCursor cursor for select goal_id from goalgoal_goalassociation where subgoal_id = goalId and environment_id = envId; 
+  declare obsGoalCursor cursor for select obstructed from temp_obstructed order by 1; 
+  declare continue handler for not found set done = 1;
+
+  open rootGoalCursor;
+  rg_loop: loop
+    fetch rootGoalCursor into rgId;
+    if done = 1
+    then
+      leave rg_loop;
+    end if;
+
+    select count(goal_id) into goalCount from goalgoal_goalassociation where subgoal_id = rgId and environment_id = envId;
+    if goalCount = 0
+    then
+      select name into rootGoalName from goal where id = goalId;
+      open obsGoalCursor;
+      obsGoal_loop: loop
+        fetch obsGoalCursor into obsGoalName;
+        if done = 1
+        then
+          leave obsGoal_loop;
+        end if;
+        insert into temp_goal(root,obstructed) values (rootGoalName,obsGoalName); 
+      end loop obsGoal_loop;
+      close obsGoalCursor;
+      set done = 0;
+      delete from temp_obstructed;
+    else
+      call goalRoot(rgId,envId);
+    end if;
+  end loop rg_loop;
+  close rootGoalCursor;
+end
+//
+
+create procedure obstructedTasks(in environmentId int)
+begin
+  declare done int default 0;
+  declare taskId int;
+  declare rootName varchar(100);
+  declare obsName varchar(100);
+  declare taskName varchar(200);
+  declare taskCursor cursor for select t.name,t.id from task t, environment_task et where et.environment_id = environmentId and et.task_id = t.id order by 1;
+  declare obsRootGoalCursor cursor for select root,obstructed from temp_goal order by 1;
+  declare continue handler for not found set done = 1;
+
+  open taskCursor;
+  task_loop: loop
+    fetch taskCursor into taskName, taskId;
+    if done = 1
+    then
+      leave task_loop;
+    end if;
+    call obstructedGoals(taskId,environmentId);
+
+    open obsRootGoalCursor;
+    org_loop: loop
+      fetch obsRootGoalCursor into rootName,obsName;
+      if done = 1
+      then
+        leave org_loop;
+      end if;
+      insert into temp_vout(label,message) values ('Obstructed task',concat('Task ',taskName,' is needed to satisfy goal ',rootName,', but refining goal  ',obsName,' is obstructed.'));
+    end loop org_loop;
+    close obsRootGoalCursor;
+    set done = 0;
+  end loop task_loop;
+  close taskCursor;
+end
+//
+
+create procedure isGoalObstructed(in goalId int,in environmentId int, out isObstructed bool) 
+begin
+  declare done int default 0;
+  declare obsCount int;
+  declare obsId int;
+  declare tgId int;
+  declare roCount int default 0;
+  declare goalCursor cursor for select subgoal_id from goalgoal_goalassociation where environment_id = environmentId and goal_id = goalId;
+  declare obsCursor cursor for select subgoal_id from goalobstacle_goalassociation where environment_id = environmentId and goal_id = goalId;
+  declare continue handler for not found set done = 1;
+
+
+
+  select count(subgoal_id) into obsCount from goalobstacle_goalassociation where goal_id = goalId and environment_id = environmentId;
+  if (obsCount > 0)
+  then
+    select count(og.subgoal_id) into roCount from goalobstacle_goalassociation go, obstaclegoal_goalassociation og where go.goal_id = goalId and go.subgoal_id = og.goal_id and og.environment_id = environmentId and og.environment_id = go.environment_id;
+    if (roCount > 0)
+    then
+      set isObstructed = false;
+    else
+      set isObstructed = true;
+      open obsCursor;
+      obs_loop: loop
+        fetch obsCursor into obsId;
+        if done = 1
+        then
+          leave obs_loop;
+        end if;
+        call isObstacleObstructed(obsId,environmentId,isObstructed);
+      end loop obs_loop;
+      close obsCursor;
+      set done = 0;
+    end if;
+  else
+    open goalCursor;
+    goal_loop: loop
+      fetch goalCursor into tgId;
+      if done = 1
+      then
+        leave goal_loop;
+      end if;
+      call isGoalObstructed(tgId,environmentId,isObstructed);
+      if (isObstructed = true)
+      then
+        insert into temp_obstructed
+        select name from goal where id = tgId;
+        leave goal_loop;
+      end if;
+    end loop goal_loop;
+    close goalCursor;
+  end if;
+end
+//
+
+create procedure isObstacleObstructed(in obstacleId int,in environmentId int, out isObstructed bool) 
+begin
+  declare done int default 0;
+  declare loId int;
+  declare roCount int default 0;
+  declare dpCount int default 0;
+  declare andObsCursor cursor for select subgoal_id from obstacleobstacle_goalassociation where environment_id = environmentId and goal_id = obstacleId and ref_type_id = 0;
+  declare orObsCursor cursor for select subgoal_id from obstacleobstacle_goalassociation where environment_id = environmentId and goal_id = obstacleId and ref_type_id = 1;
+  declare continue handler for not found set done = 1;
+
+  select count(subgoal_id) into roCount from obstaclegoal_goalassociation og where goal_id = obstacleId and environment_id = environmentId;
+  select count(subgoal_id) into dpCount from obstacledomainproperty_goalassociation og where goal_id = obstacleId and environment_id = environmentId;
+  if (roCount > 0 or dpCount > 0)
+  then
+    set isObstructed = false;
+  else
+    set isObstructed = true;
+    open orObsCursor;
+    orobs_loop: loop
+      fetch orObsCursor into loId;
+      if done = 1
+      then
+        leave orobs_loop;
+      end if;
+      call isObstacleObstructed(loId,environmentId,isObstructed);
+      if (isObstructed = true)
+      then
+        leave orobs_loop;
+      end if;
+    end loop orobs_loop;
+    close orObsCursor;
+   
+    set done = 0;
+
+    open andObsCursor;
+    andobs_loop: loop
+      fetch andObsCursor into loId;
+      if done = 1
+      then
+        leave andobs_loop;
+      end if;
+      call isObstacleObstructed(loId,environmentId,isObstructed);
+      if (isObstructed = false)
+      then
+        leave andobs_loop;
+      end if;
+    end loop andobs_loop;
+    close andObsCursor;
+  end if;
+end
+//
+
+create procedure getImage(in imageName text)
+begin
+  select content,mimetype from image where name = imageName limit 1;
+end
+//
+
+create procedure setImage(in imageName text, in imageContent longblob, in mimeType text)
+begin
+  delete from image where name = imageName;
+  insert into image(name,content,mimetype) values (imageName,imageContent, mimeType);
+end
+//
+
+create procedure getImages()
+begin
+  select name,content from image;
+end
+//
+
+create procedure tvTypesToJSON()
+begin
+  declare typeName varchar(100);
+  declare typeDesc varchar(5000);
+  declare ttCount int default 0;
+  declare vtCount int default 0;
+  declare buf longtext default '';
+  declare done int default 0;
+  declare headElement int default 1;
+  declare vtCursor cursor for select jsonEscaped(name),jsonEscaped(description) from vulnerability_type order by 1;
+  declare ttCursor cursor for select jsonEscaped(name),jsonEscaped(description) from threat_type order by 1;
+  declare continue handler for not found set done = 1;
+
+  set buf = '"vulnerability_types" : [\n';
+  open vtCursor;
+  vt_loop: loop
+    fetch vtCursor into typeName, typeDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"],\n\n");
+      leave vt_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',typeName,'", "description" : "',typeDesc,'"}');
+
+    set vtCount = vtCount + 1;
+  end loop vt_loop;
+  close vtCursor;
+
+
+  set done = 0;
+  set headElement = 1;
+  set buf = concat(buf,'"threat_types" : [\n');
+  open ttCursor;
+  tt_loop: loop
+    fetch ttCursor into typeName, typeDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"]\n\n");
+      leave tt_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',typeName,'", "description" : "',typeDesc,'"}');
+
+    set ttCount = ttCount + 1;
+  end loop tt_loop;
+  close ttCursor;
+
+  select buf,ttCount,vtCount;
+end
+//
+
+create function jsonEscaped(buf text) 
+returns text
+deterministic 
+begin
+  return replace(replace(replace(buf,'\n','\\n'),'\t','\\t'),'"','\\"');
+end
+//
+
+
+create procedure domainValuesToJSON()
+begin
+  declare typeName varchar(100);
+  declare typeDesc varchar(5000);
+  declare tvCount int default 0;
+  declare rvCount int default 0;
+  declare cvCount int default 0;
+  declare svCount int default 0;
+  declare lvCount int default 0;
+  declare done int default 0;
+  declare headElement int default 1;
+  declare buf LONGTEXT default '';
+  declare tvCursor cursor for select jsonEscaped(name),jsonEscaped(description) from threat_value order by id;
+  declare rvCursor cursor for select jsonEscaped(name),jsonEscaped(description) from risk_class order by id;
+  declare cvCursor cursor for select jsonEscaped(name),jsonEscaped(description) from countermeasure_value order by id;
+  declare svCursor cursor for select jsonEscaped(name),jsonEscaped(description) from severity order by id;
+  declare lvCursor cursor for select jsonEscaped(name),jsonEscaped(description) from likelihood order by id;
+  declare continue handler for not found set done = 1;
+
+  set buf = '"threat_values" : [\n';
+  open tvCursor;
+  tv_loop: loop
+    fetch tvCursor into typeName,typeDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"],\n\n");
+      leave tv_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',typeName,'",  "description" : "',typeDesc,'"}');
+    set tvCount = tvCount + 1;
+  end loop tv_loop;
+  close tvCursor;
+
+  set done = 0;
+  set buf = concat(buf,'"risk_values" : [\n');
+  set headElement = 1;
+  open rvCursor;
+  rv_loop: loop
+    fetch rvCursor into typeName,typeDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"],\n\n");
+      leave rv_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',typeName,'", "description" : "',typeDesc,'"}');
+    set rvCount = rvCount + 1;
+  end loop rv_loop;
+  close rvCursor;
+
+  set done = 0;
+  set buf = concat(buf,'"countermeasure_values" : [\n');
+  set headElement = 1;
+  open cvCursor;
+  cv_loop: loop
+    fetch cvCursor into typeName,typeDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"],\n\n");
+      leave cv_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',typeName,'", "description" : "',typeDesc,'"}');
+    set cvCount = cvCount + 1;
+  end loop cv_loop;
+
+  set done = 0;
+  set buf = concat(buf,'"severity_values" : [\n');
+  set headElement = 1;
+  open svCursor;
+  set headElement = 1;
+  sv_loop: loop
+    fetch svCursor into typeName,typeDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"],\n\n");
+      leave sv_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',typeName,'", "description" : "',typeDesc,'"}');
+    set svCount = svCount + 1;
+  end loop sv_loop;
+
+  set done = 0;
+  set buf = concat(buf,'"likelihood_values" : [\n');
+  set headElement = 1;
+  open lvCursor;
+  set headElement = 1;
+  lv_loop: loop
+    fetch lvCursor into typeName,typeDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"]\n\n");
+      leave lv_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',typeName,'", "description" : "',typeDesc,'"}');
+    set lvCount = lvCount + 1;
+  end loop lv_loop;
+
+  select buf,tvCount,rvCount,cvCount,svCount,lvCount;
+end
+//
+
+create procedure projectToJSON()
+begin
+  declare buf LONGTEXT default '';
+  declare projName varchar(4000) default 'None';
+  declare background varchar(4000) default '';
+  declare strategicGoals varchar(4000) default '';
+  declare richPic varchar(1000) default '';
+  declare scope varchar(4000) default '';
+  declare ncName varchar(100);
+  declare ncEntry varchar(4000);
+  declare firstName varchar(100) default '';
+  declare surName varchar(100) default '';
+  declare affil varchar(100) default '';
+  declare projRole varchar(50) default '';
+  declare revNo int;
+  declare revDate varchar(50) default '';
+  declare revRemarks varchar(1000) default 'None';
+  declare envId int;
+  declare envName varchar(50);
+  declare envShortCode varchar(100);
+  declare envDesc varchar(4000);
+  declare duplicatePolicy varchar(50);
+  declare overridingEnvName varchar(50);
+  declare subEnvName varchar(50);
+  declare noneValue varchar(4000) default '';
+  declare lowValue varchar(4000) default '';
+  declare medValue varchar(4000) default '';
+  declare highValue varchar(4000) default '';
+  declare ncCount int default 0;
+  declare contributorCount int default 0;
+  declare revCount int default 0;
+  declare compositeCount int default 0;
+  declare headElement int default 1;
+  declare done int default 0;
+  declare ncCursor cursor for select name,jsonEscaped(description) from project_dictionary order by name;
+  declare contribCursor cursor for select * from project_contributor order by 2;
+  declare revCursor cursor for select revision_no,revision_date,jsonEscaped(revision_remarks) from project_revision order by 1;
+  declare envCursor cursor for select id,name,jsonEscaped(short_code),jsonEscaped(description) from environment;
+  declare ceCursor cursor for select e.name from composite_environment ce, environment e where ce.composite_environment_id = envId and ce.environment_id = e.id;
+  declare continue handler for not found set done = 1;
+
+  select jsonEscaped(ifnull(description,'')) into projName from project_setting where name = 'Project Name';
+  select jsonEscaped(ifnull(description,'')) into background from project_setting where name = 'Project Background';
+  select jsonEscaped(ifnull(description,'')) into strategicGoals from project_setting where name = 'Project Goals';
+  select description into richPic from project_setting where name = 'Rich Picture';
+  select jsonEscaped(ifnull(description,'')) into scope from project_setting where name = 'Project Scope';
+
+  set buf = concat(buf,'"project_settings" : {\n  "name" : "',projName,'",\n  "background" : "',background,'",\n  "strategic_goals" : "',strategicGoals,'",\n  "rich_picture" : "', richPic,'",\n  "scope" : "',scope,'",\n');
+
+  select count(name) into ncCount from project_dictionary limit 1;
+  if ncCount > 0
+  then
+    set buf = concat(buf,'  "naming_conventions" : [\n');
+    open ncCursor;
+    nc_loop: loop
+      fetch ncCursor into ncName,ncEntry;
+      if done = 1
+      then
+        set buf = concat(buf,"],\n");
+        leave nc_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      set buf = concat(buf,'    {"name" : "',ncName,'", "definition" : "',ncEntry,'"}');
+    end loop nc_loop;
+    close ncCursor;
+  end if;
+  set done = 0;
+
+  
+  set headElement = 1;
+  select count(affiliation) into contributorCount from project_contributor limit 1;
+  if contributorCount > 0
+  then 
+    set buf = concat(buf,'  "contributors" : [\n'); 
+    open contribCursor;
+    contrib_loop: loop
+      fetch contribCursor into firstName,surName,affil,projRole;
+      if done = 1
+      then
+        set buf = concat(buf,"],\n");
+        leave contrib_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+
+      set buf = concat(buf,'    {"first_name" : "',firstName,'", "surname" : "',surName,'", "affiliation" : "',affil,'", "role" : "',projRole,'"}');
+    end loop contrib_loop;
+    close contribCursor;
+  end if; 
+  set done = 0;
+
+  set headElement = 1;
+  set buf = concat(buf,'  "revisions" : [\n');
+  select count(revision_no) into revCount from project_revision limit 1;
+  if revCount > 0
+  then
+    open revCursor;
+    rev_loop: loop
+      fetch revCursor into revNo,revDate,revRemarks;
+      if done = 1
+      then
+        set buf = concat(buf,"]\n");
+        leave rev_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      set buf = concat(buf,'    {"number" : "',revNo,'", "date" : "',revDate,'", "remarks" : "',revRemarks,'"}');
+    end loop rev_loop;
+    close revCursor;
+  else
+    set buf = concat(buf,"]\n");
+  end if;
+  set done = 0;
+  set buf = concat(buf,'},\n');
+
+  set buf = concat(buf,'"environments" : [\n');
+  set headElement = 1;
+  open envCursor;
+  env_loop: loop
+    fetch envCursor into envId,envName,envShortCode,envDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"]\n");
+      leave env_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',envName,'",\n  "short_code" : "',envShortCode,'",\n  "definition" : "',envDesc,'",\n');
+
+    select jsonEscaped(description) into noneValue from asset_value where id = 0 and environment_id = envId;
+    if isnull(noneValue)
+    then
+      set noneValue = 'None';
+    end if;
+    select jsonEscaped(description) into lowValue from asset_value where id = 1 and environment_id = envId;
+    if isnull(lowValue)
+    then
+      set lowValue = 'None';
+    end if;
+    select jsonEscaped(description) into medValue from asset_value where id = 2 and environment_id = envId;
+    if isnull(medValue)
+    then
+      set medValue = 'None';
+    end if;
+    select jsonEscaped(description) into highValue from asset_value where id = 3 and environment_id = envId;
+    if isnull(highValue)
+    then
+      set highValue = 'None';
+    end if;
+    set buf = concat(buf,'  "asset_values" : {"none" : "',noneValue,'", "low" : "',lowValue,'", "medium" : "',medValue,'", "high" : "',highValue,'"}\n');
+
+    select count(environment_id) into compositeCount from composite_environment where composite_environment_id = envId limit 1;
+    if compositeCount > 0
+    then
+      select dp.name into duplicatePolicy from duplicate_property dp, composite_environment_property ccp where ccp.composite_environment_id = envId and ccp.duplicate_property_id = dp.id limit 1;
+      set buf = concat(buf,'  "composite_properties" : {"duplication" : "',duplicatePolicy,'"');
+      if duplicatePolicy = 'Override'
+      then
+        select e.name into overridingEnvName from composite_environment_override ceo, environment e where ceo.composite_environment_id = envId and ceo.overriding_environment_id = e.id limit 1;
+        set buf = concat(buf,', "overriding_environment" : "',overridingEnvName,'" ');
+      end if;
+      set buf = concat(buf,',\n');
+      set headElement = 1;
+      open ceCursor;
+      ce_loop: loop
+        fetch ceCursor into subEnvName;
+        if done = 1
+        then
+          set buf = concat(buf,"  }\n");
+          leave ce_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",\n");
+          end if;
+        end if;
+        set buf = concat(buf,'    "sub_environment" : "',subEnvName,'"');
+      end loop ce_loop;
+      close ceCursor;
+      set done = 0;
+    end if;
+
+    set buf = concat(buf,'  }');
+  end loop env_loop; 
+  close envCursor;
+  set done = 0;
+  set headElement = 1;
+  select buf;
+end
+//
+
+create procedure riskAnalysisToJSON()
+begin
+  declare tagName varchar(255);
+  declare roleName varchar(255);
+  declare roleType varchar(50);
+  declare roleShortCode varchar(100);
+  declare roleDesc varchar(1000);
+  declare roleCount int default 0;
+  declare assetCount int default 0;
+  declare rshipCount int default 0;
+  declare headElement int default 1;
+  declare assetId int;
+  declare envId int;
+  declare envName varchar(50);
+  declare assetName varchar(200);
+  declare assetShortCode varchar(20);
+  declare assetDesc varchar(1000);
+  declare assetSignif varchar(1000);
+  declare assetType varchar(50);
+  declare isCritical int;
+  declare ifName varchar(255);
+  declare reqId int;
+  declare ifType varchar(50);
+  declare assetCr varchar(1000);
+  declare cProperty varchar(50);
+  declare iProperty varchar(50);
+  declare avProperty varchar(50);
+  declare acProperty varchar(50);
+  declare anProperty varchar(50);
+  declare panProperty varchar(50);
+  declare unlProperty varchar(50);
+  declare unoProperty varchar(50);
+  declare cRationale varchar(4000);
+  declare iRationale varchar(4000);
+  declare avRationale varchar(4000);
+  declare acRationale varchar(4000);
+  declare anRationale varchar(4000);
+  declare panRationale varchar(4000);
+  declare unlRationale varchar(4000);
+  declare unoRationale varchar(4000);
+  declare vulId int;
+  declare vulName varchar(200);
+  declare vulDesc varchar(500);
+  declare vulType varchar(100);
+  declare vulCount int default 0;
+  declare attackerId int;
+  declare attackerName varchar(50);
+  declare attackerDesc varchar(4000);
+  declare attackerImage varchar(1000);
+  declare attackerCount int default 0; 
+  declare motivName varchar(50);
+  declare capabilityName varchar(50);
+  declare capabilityValue varchar(50);
+  declare threatId int;
+  declare threatName varchar(200);
+  declare threatType varchar(100);
+  declare threatMethod text;
+  declare threatCount int default 0;
+  declare riskId int;
+  declare riskName varchar(200);
+  declare riskCount int default 0;
+  declare mcNarrative varchar(5000);
+  declare responseId int;
+  declare responseName varchar(100);
+  declare responseType varchar(50);
+  declare responseCount int default 0;
+  declare roleCost varchar(50);
+  declare mitType varchar(50);
+  declare headName varchar(100);
+  declare headAdornment varchar(50);
+  declare headNry varchar(10);
+  declare headRole varchar(50);
+  declare tailRole varchar(50);
+  declare tailNry varchar(10);
+  declare tailAdornment varchar(50);
+  declare tailName varchar(100);
+  declare headNav int;
+  declare tailNav int;
+  declare assocRationale longtext default '';
+  declare buf LONGTEXT default '';
+  declare done int default 0;
+  declare assetIFCursor cursor for select i.name,ai.required_id from asset_interface ai, interface i where ai.asset_id = assetId and ai.interface_id = i.id;
+  declare assetTagCursor cursor for select t.name from asset_tag at, tag t where at.asset_id = assetId and at.tag_id = t.id;
+  declare attackerTagCursor cursor for select t.name from attacker_tag at, tag t where at.attacker_id = attackerId and at.tag_id = t.id;
+  declare vulTagCursor cursor for select t.name from vulnerability_tag vt, tag t where vt.vulnerability_id = vulId and vt.tag_id = t.id;
+  declare threatTagCursor cursor for select t.name from threat_tag tt, tag t where tt.threat_id = threatId and tt.tag_id = t.id;
+  declare riskTagCursor cursor for select t.name from risk_tag rt, tag t where rt.risk_id = riskId and rt.tag_id = t.id;
+  declare roleCursor cursor for  select r.name,rt.name,r.short_code,jsonEscaped(r.description) from role r, role_type rt where r.role_type_id = rt.id;
+  declare assetEnvCursor cursor for select ea.environment_id,e.name from environment_asset ea, environment e where ea.asset_id = assetId and ea.environment_id = e.id;
+  declare vulEnvCursor cursor for select ev.environment_id,e.name from environment_vulnerability ev, environment e where ev.vulnerability_id = vulId and ev.environment_id = e.id;
+  declare attackerEnvCursor cursor for select ea.environment_id,e.name from environment_attacker ea, environment e where ea.attacker_id = attackerId and ea.environment_id = e.id;
+  declare threatEnvCursor cursor for select et.environment_id,e.name from environment_threat et, environment e where et.threat_id = threatId and et.environment_id = e.id;
+  declare responseEnvCursor cursor for select er.environment_id,e.name from environment_response er, environment e where er.response_id = responseId and er.environment_id = e.id;
+  declare assetCursor cursor for select a.id,a.name,a.short_code,jsonEscaped(a.description),jsonEscaped(a.significance),at.name,a.is_critical,ifnull(a.critical_rationale,'None') from asset a,asset_type at where a.asset_type_id = at.id;
+  declare vulCursor cursor for select v.id,v.name,jsonEscaped(v.description),vt.name from vulnerability v,vulnerability_type vt where v.vulnerability_type_id = vt.id;
+  declare attackerCursor cursor for select id,name,jsonEscaped(description),image from attacker;
+  declare attackerRolesCursor cursor for select r.name from attacker_role ar, role r where ar.attacker_id = attackerId and ar.environment_id = envId and ar.role_id = r.id;
+  declare motivCursor cursor for select m.name from attacker_motivation am, motivation m where am.attacker_id = attackerId and am.environment_id = envId and am.motivation_id = m.id;
+  declare capabilityCursor cursor for select c.name,cv.name from attacker_capability ac, capability c, capability_value cv where ac.attacker_id = attackerId and ac.environment_id = envId and ac.capability_id = c.id and ac.capability_value_id = cv.id;
+  declare vulAssetsCursor cursor for select a.name from asset a, asset_vulnerability av where av.vulnerability_id = vulId and av.environment_id = envId and av.asset_id = a.id;
+  declare threatCursor cursor for select t.id, t.name, tt.name, t.method from threat t, threat_type tt where t.threat_type_id = tt.id;
+  declare threatAttackerCursor cursor for select a.name from threat_attacker ta, attacker a where ta.threat_id = threatId and ta.environment_id = envId and ta.attacker_id = a.id;
+  declare threatAssetCursor cursor for select a.name from asset a, asset_threat at where at.threat_id = threatId and at.asset_id = a.id and at.environment_id = envId;
+  declare riskCursor cursor for select r.id, r.name,t.name,v.name from risk r, threat t, vulnerability v where r.threat_id = t.id and r.vulnerability_id = v.id;
+  declare mcCursor cursor for select e.name,jsonEscaped(mn.narrative) from misusecase_risk mr, misusecase_narrative mn, environment e where mr.risk_id = riskId and mr.misusecase_id = mn.misusecase_id and mn.environment_id = e.id;
+  declare responseCursor cursor for select re.id,re.name,rt.name,r.name from response re,goal_category_type rt, risk r where re.goal_category_type_id = rt.id and re.risk_id = r.id;
+  declare responseRoleCursor cursor for select r.name,c.name from responserole_goalassociation rr, role r, cost c where rr.goal_id = responseId and rr.environment_id = envId and rr.subgoal_id = r.id and rr.cost_id = c.id;
+  declare detMechCursor cursor for select a.name from asset a, reaction_detection_mechanism rdm where rdm.response_id = responseId and rdm.environment_id = envId and rdm.asset_id = a.id;
+  declare assocCursor cursor for select e.name, ha.name,a.head_navigation,hat.name,hm.name,a.head_role_name,a.tail_role_name,tm.name,tat.name,a.tail_navigation,ta.name,jsonEscaped(a.rationale) from classassociation a, environment e, asset ha, multiplicity_type hm, association_type hat, association_type tat, multiplicity_type tm, asset ta where a.environment_id = e.id and a.head_id = ha.id and a.head_multiplicity_id = hm.id and a.head_association_type_id = hat.id and a.tail_association_type_id = tat.id and a.tail_multiplicity_id = tm.id and a.tail_id = ta.id;
+  declare continue handler for not found set done = 1;
+
+  set buf = concat(buf,'"roles" : [\n');
+  open roleCursor;
+  role_loop: loop
+    fetch roleCursor into roleName, roleType, roleShortCode,roleDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"],\n");
+      leave role_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',roleName,'", "type" : "',roleType,'", "short_code" : "',roleShortCode,'",  "description" : "',roleDesc,'"}');
+    set roleCount = roleCount + 1;
+  end loop role_loop;
+  close roleCursor;
+  set done = 0;
+
+  set headElement = 1;
+  set buf = concat(buf,'"assets" : [\n');
+  open assetCursor;
+  asset_loop: loop
+    fetch assetCursor into assetId, assetName, assetShortCode, assetDesc, assetSignif, assetType, isCritical, assetCr;
+    if done = 1
+    then
+      set buf = concat(buf,"  }\n],\n");
+      leave asset_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"  },\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',assetName,'", "short_code" : "',assetShortCode,'", "type" : "',assetType,'", "is_critical" : "',isCritical,'", "description" : "',assetDesc,'", "significance" : "',assetSignif,'", "critical_rationale" : "',assetCr,'",\n');
+    set buf = concat(buf,'    "tags" : [');
+
+    set headElement = 1;
+    open assetTagCursor;
+    assetTag_loop: loop
+      fetch assetTagCursor into tagName;
+      if done = 1
+      then
+        set buf = concat(buf,'], "interfaces" : [');
+        leave assetTag_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      set buf = concat(buf,'"',tagName,'"'); 
+    end loop assetTag_loop;
+    close assetTagCursor;
+    set done = 0;
+
+    set headElement = 1;
+    open assetIFCursor;
+    assetIF_loop: loop
+      fetch assetIFCursor into ifName,reqId;
+      if done = 1
+      then
+        set buf = concat(buf,'],\n    "environments" : [\n');
+        leave assetIF_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      if reqId = 1
+      then
+        set ifType = 'required';
+      else
+        set ifType = 'provided';
+      end if;
+      set buf = concat(buf,'      {"name" : "',ifName,'", "type" : "',ifType,'"}');
+    end loop assetIF_loop;
+    close assetIFCursor;
+    set done = 0;
+
+    set headElement = 1;
+    open assetEnvCursor;
+    assetEnv_loop: loop
+      fetch assetEnvCursor into envId, envName;
+      if done = 1
+      then
+        set buf = concat(buf,'    ]\n');
+        leave assetEnv_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      select spv.name,ap.property_rationale into cProperty,cRationale from asset_property ap, security_property_value spv where ap.asset_id = assetId and ap.property_id = 0 and ap.environment_id = envId and ap.property_value_id = spv.id;
+      select spv.name,ap.property_rationale into iProperty,iRationale from asset_property ap, security_property_value spv where ap.asset_id = assetId and ap.property_id = 1 and ap.environment_id = envId and ap.property_value_id = spv.id;
+      select spv.name,ap.property_rationale into avProperty,avRationale from asset_property ap, security_property_value spv where ap.asset_id = assetId and ap.property_id = 2 and ap.environment_id = envId and ap.property_value_id = spv.id;
+      select spv.name,ap.property_rationale into acProperty,acRationale from asset_property ap, security_property_value spv where ap.asset_id = assetId and ap.property_id = 3 and ap.environment_id = envId and ap.property_value_id = spv.id;
+      select spv.name,ap.property_rationale into anProperty,anRationale from asset_property ap, security_property_value spv where ap.asset_id = assetId and ap.property_id = 4 and ap.environment_id = envId and ap.property_value_id = spv.id;
+      select spv.name,ap.property_rationale into panProperty,panRationale from asset_property ap, security_property_value spv where ap.asset_id = assetId and ap.property_id = 5 and ap.environment_id = envId and ap.property_value_id = spv.id;
+      select spv.name,ap.property_rationale into unlProperty,unlRationale from asset_property ap, security_property_value spv where ap.asset_id = assetId and ap.property_id = 6 and ap.environment_id = envId and ap.property_value_id = spv.id;
+      select spv.name,ap.property_rationale into unoProperty,unoRationale from asset_property ap, security_property_value spv where ap.asset_id = assetId and ap.property_id = 7 and ap.environment_id = envId and ap.property_value_id = spv.id;
+
+      if cProperty != 'None'
+      then
+        set buf = concat(buf,'      {"name" : "',envName,'", "property" : "confidentiality", "value" : "',cProperty,'", "rationale" : "',cRationale,'"}');
+        if iProperty != 'None' or avProperty != 'None' or acProperty != 'None' or anProperty != 'None' or panProperty != 'None' or unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",\n");
+        else
+          set buf = concat(buf,"\n");
+        end if;
+      end if;
+      if iProperty != 'None'
+      then
+        set buf = concat(buf,'      {"name" : "',envName,'", "property" : "integrity", "value" : "',iProperty,'", "rationale" : "',iRationale,'"}');
+        if avProperty != 'None' or acProperty != 'None' or anProperty != 'None' or panProperty != 'None' or unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",\n");
+        else
+          set buf = concat(buf,"\n");
+        end if;
+      end if;
+      if avProperty != 'None'
+      then
+        set buf = concat(buf,'      {"name" : "',envName,'", "property" : "availability", "value" : "',avProperty,'", "rationale" : "',avRationale,'"}');
+        if acProperty != 'None' or anProperty != 'None' or panProperty != 'None' or unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",\n");
+        else
+          set buf = concat(buf,"\n");
+        end if;
+      end if;
+      if acProperty != 'None'
+      then
+        set buf = concat(buf,'      {"name" : "',envName,'", "property" : "accountability", "value" : "',acProperty,'", "rationale" : "',acRationale,'"}');
+        if anProperty != 'None' or panProperty != 'None' or unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",\n");
+        else
+          set buf = concat(buf,"\n");
+        end if;
+      end if;
+      if anProperty != 'None'
+      then
+        set buf = concat(buf,'      {"name" : "',envName,'", "property" : "anonymity", "value" : "',anProperty,'", "rationale" : "',anRationale,'"}');
+        if panProperty != 'None' or unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",\n");
+        else
+          set buf = concat(buf,"\n");
+        end if;
+      end if;
+      if panProperty != 'None'
+      then
+        set buf = concat(buf,'      {"name" : "',envName,'", "property" : "pseudonymity", "value" : "',panProperty,'", "rationale" : "',panRationale,'"}');
+        if unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",\n");
+        else
+          set buf = concat(buf,"\n");
+        end if;
+      end if;
+      if unlProperty != 'None'
+      then
+        set buf = concat(buf,'      {"name" : "',envName,'", "property" : "unlinkability", "value" : "',unlProperty,'", "rationale" : "',unlRationale,'"}');
+        if unoProperty != 'None'
+        then
+          set buf = concat(buf,",\n");
+        else
+          set buf = concat(buf,"\n");
+        end if;
+      end if;
+      if unoProperty != 'None'
+      then
+        set buf = concat(buf,'      {"name" : "',envName,'", "property" : "unobservability", "value" : "',unoProperty,'", "rationale" : "',unoRationale,'"}\n');
+      end if;
+    end loop assetEnv_loop;
+    close assetEnvCursor;
+    set done = 0;
+    set assetCount = assetCount + 1;
+  end loop asset_loop;
+  close assetCursor;
+
+  set done = 0;
+  set headElement = 1;
+  set buf = concat(buf,'"vulnerabilities" : [\n');
+  open vulCursor;
+  vul_loop: loop
+    fetch vulCursor into vulId, vulName, vulDesc, vulType;
+    if done = 1
+    then
+      set buf = concat(buf,"  }\n],\n");
+      leave vul_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"  },\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',vulName,'", "type" : "',vulType,'", "description" : "',vulDesc,'",\n    "tags" : [');
+    set vulCount = vulCount + 1;
+
+    set headElement = 1;
+    open vulTagCursor;
+    vulTag_loop: loop
+      fetch vulTagCursor into tagName;
+      if done = 1
+      then
+        set buf = concat(buf,'],\n    "environments" : [\n');
+        leave vulTag_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      if done = 1
+      then
+        leave vulTag_loop;
+      end if;
+      set buf = concat(buf,'"',tagName,'"'); 
+    end loop vulTag_loop;
+    close vulTagCursor;
+    set done = 0;
+
+    set headElement = 1;
+    open vulEnvCursor;
+    vulEnv_loop: loop
+      fetch vulEnvCursor into envId, envName;
+      if done = 1
+      then
+        set buf = concat(buf,'\n    ]\n');
+        leave vulEnv_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      set buf = concat(buf,'      {"name" : "',envName,'", "severity" : "',vulnerability_severity(vulId,envId),'", "assets" : [');
+
+      set headElement = 1;
+      open vulAssetsCursor;
+      vulAssets_loop: loop
+        fetch vulAssetsCursor into assetName;
+        if done = 1
+        then
+          set buf = concat(buf,']}');
+          leave vulAssets_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'"',assetName,'"');
+      end loop vulAssets_loop;
+      close vulAssetsCursor;
+      set done = 0;
+    end loop vulEnv_loop;
+    close vulEnvCursor;
+    set done = 0;
+
+  end loop vul_loop;
+  close vulCursor;
+
+  set done = 0;
+  set headElement = 1;
+  set buf = concat(buf,'"attackers" : [\n');
+  open attackerCursor;
+  attacker_loop: loop
+    fetch attackerCursor into attackerId, attackerName, attackerDesc, attackerImage;
+    if done = 1
+    then
+      set buf = concat(buf,"  }\n],\n");
+      leave attacker_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"  },\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',attackerName,'", "image" : "',attackerImage,'", "description" : "',attackerDesc,'", "tags" : [');
+    set attackerCount = attackerCount + 1;
+
+    set headElement = 1;
+    open attackerTagCursor;
+    attackerTag_loop: loop
+      fetch attackerTagCursor into tagName;
+      if done = 1
+      then
+        set buf = concat(buf,'],\n    "environments" : [\n');
+        leave attackerTag_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      set buf = concat(buf,'"',tagName,'"'); 
+    end loop attackerTag_loop;
+    close attackerTagCursor;
+    set done = 0;
+
+    set headElement = 1;
+    open attackerEnvCursor;
+    attackerEnv_loop: loop
+      fetch attackerEnvCursor into envId, envName;
+      if done = 1
+      then
+        set buf = concat(buf,'\n    ]\n');
+        leave attackerEnv_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      set buf = concat(buf,'      {"name" : "',envName,'", "roles" : [');
+
+      set headElement = 1;
+      open attackerRolesCursor;
+      attackerRoles_loop: loop
+        fetch attackerRolesCursor into roleName;
+        if done = 1
+        then
+          set buf = concat(buf,'], "motivations" : [');
+          leave attackerRoles_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'"',roleName,'"');
+      end loop attackerRoles_loop;
+      close attackerRolesCursor;
+      set done = 0;
+
+      set headElement = 1;
+      open motivCursor;
+      motiv_loop: loop
+        fetch motivCursor into motivName;
+        if done = 1
+        then
+          set buf = concat(buf,'], "capabilities" : [');
+          leave motiv_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'"',motivName,'"');
+      end loop motiv_loop;
+      close motivCursor;
+      set done = 0;
+
+      set headElement = 1;
+      open capabilityCursor;
+      capability_loop: loop
+        fetch capabilityCursor into capabilityName,capabilityValue;
+        if done = 1
+        then
+          set buf = concat(buf,']\n      }');
+          leave capability_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        if done = 1
+        then
+          leave capability_loop;
+        end if;
+        set buf = concat(buf,'{"name" : "',capabilityName,'", "value" : "',capabilityValue,'"}');
+      end loop capability_loop;
+      close capabilityCursor;
+      set done = 0;
+    end loop attackerEnv_loop;
+    close attackerEnvCursor;
+    set done = 0;
+  end loop attacker_loop;
+  close attackerCursor;
+
+  set done = 0;
+  set headElement = 1;
+  set buf = concat(buf,'"threats" : [\n');
+  open threatCursor;
+  threat_loop: loop
+    fetch threatCursor into threatId, threatName, threatType, threatMethod;
+    if done = 1
+    then
+      set buf = concat(buf,"  }\n],\n");
+      leave threat_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"  },\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',threatName,'", "type" : "',threatType,'", "method" : "',threatMethod,'", "tags" : [');
+    set threatCount = threatCount + 1;
+
+    set headElement = 1;
+    open threatTagCursor;
+    threatTag_loop: loop
+      fetch threatTagCursor into tagName;
+      if done = 1
+      then
+        set buf = concat(buf,'],\n    "environments" : [\n');
+        leave threatTag_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      set buf = concat(buf,'"',tagName,'"'); 
+    end loop threatTag_loop;
+    close threatTagCursor;
+    set done = 0;
+
+    set headElement = 1;
+    open threatEnvCursor;
+    threatEnv_loop: loop
+      fetch threatEnvCursor into envId, envName;
+      if done = 1
+      then
+        set buf = concat(buf,'      }\n    ]\n');
+        leave threatEnv_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,"      },\n");
+        end if;
+      end if;
+      set buf = concat(buf,'      {"name=" : "',envName,'", "likelihood" : "',threat_likelihood(threatId,envId),'", "attackers" : [');
+
+      set headElement = 1;
+      open threatAttackerCursor;
+      threatAttacker_loop: loop
+        fetch threatAttackerCursor into attackerName;
+        if done = 1
+        then
+          set buf = concat(buf,'], "assets" : [');
+          leave threatAttacker_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'"',attackerName,'"');
+      end loop threatAttacker_loop;
+      close threatAttackerCursor;
+      set done = 0;
+
+      set headElement = 1;
+      open threatAssetCursor;
+      threatAsset_loop: loop
+        fetch threatAssetCursor into assetName;
+        if done = 1
+        then
+          set buf = concat(buf,'], "properties" : [');
+          leave threatAsset_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'"',assetName,'"');
+      end loop threatAsset_loop;
+      close threatAssetCursor;
+      set done = 0;
+
+      select spv.name,tp.property_rationale into cProperty,cRationale from threat_property tp, security_property_value spv where tp.threat_id = threatId and tp.property_id = 0 and tp.environment_id = envId and tp.property_value_id = spv.id;
+      select spv.name,tp.property_rationale into iProperty,iRationale from threat_property tp, security_property_value spv where tp.threat_id = threatId and tp.property_id = 1 and tp.environment_id = envId and tp.property_value_id = spv.id;
+      select spv.name,tp.property_rationale into avProperty,avRationale from threat_property tp, security_property_value spv where tp.threat_id = threatId and tp.property_id = 2 and tp.environment_id = envId and tp.property_value_id = spv.id;
+      select spv.name,tp.property_rationale into acProperty,acRationale from threat_property tp, security_property_value spv where tp.threat_id = threatId and tp.property_id = 3 and tp.environment_id = envId and tp.property_value_id = spv.id;
+      select spv.name,tp.property_rationale into anProperty,anRationale from threat_property tp, security_property_value spv where tp.threat_id = threatId and tp.property_id = 4 and tp.environment_id = envId and tp.property_value_id = spv.id;
+      select spv.name,tp.property_rationale into panProperty,panRationale from threat_property tp, security_property_value spv where tp.threat_id = threatId and tp.property_id = 5 and tp.environment_id = envId and tp.property_value_id = spv.id;
+      select spv.name,tp.property_rationale into unlProperty,unlRationale from threat_property tp, security_property_value spv where tp.threat_id = threatId and tp.property_id = 6 and tp.environment_id = envId and tp.property_value_id = spv.id;
+      select spv.name,tp.property_rationale into unoProperty,unoRationale from threat_property tp, security_property_value spv where tp.threat_id = threatId and tp.property_id = 7 and tp.environment_id = envId and tp.property_value_id = spv.id;
+
+      if cProperty != 'None'
+      then
+        set buf = concat(buf,'{"property" : "confidentiality", "value" : "',cProperty,'", "rationale" : "',cRationale,'"}');
+        if iProperty != 'None' or avProperty != 'None' or acProperty != 'None' or anProperty != 'None' or panProperty != 'None' or unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      if iProperty != 'None'
+      then
+        set buf = concat(buf,'{"property" : "integrity", "value" : "',iProperty,'", "rationale" : "',iRationale,'"}');
+        if avProperty != 'None' or acProperty != 'None' or anProperty != 'None' or panProperty != 'None' or unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      if avProperty != 'None'
+      then
+        set buf = concat(buf,'{"property" : "availability", "value" : "',avProperty,'", "rationale" : "',avRationale,'"}');
+        if acProperty != 'None' or anProperty != 'None' or panProperty != 'None' or unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      if acProperty != 'None'
+      then
+        set buf = concat(buf,'{"property" : "accountability", "value" : "',acProperty,'", "rationale" : "',acRationale,'"}');
+        if anProperty != 'None' or panProperty != 'None' or unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      if anProperty != 'None'
+      then
+        set buf = concat(buf,'{"property" : "anonymity", "value" : "',anProperty,'", "rationale" : "',anRationale,'"}');
+        if panProperty != 'None' or unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      if panProperty != 'None'
+      then
+        set buf = concat(buf,'{"property" : "pseudonymity", "value" : "',panProperty,'", "rationale" : "',panRationale,'"}');
+        if unlProperty != 'None' or unoProperty != 'None'
+        then
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      if unlProperty != 'None'
+      then
+        set buf = concat(buf,'{"property" : "unlinkability", "value" : "',unlProperty,'", "rationale" : "',unlRationale,'"}');
+        if unoProperty != 'None'
+        then
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      if unoProperty != 'None'
+      then
+        set buf = concat(buf,'{"property" : "unobservability", "value" : "',unoProperty,'", "rationale" : "',unoRationale,'"}');
+      end if;
+      set buf = concat(buf,']\n');
+    end loop threatEnv_loop;
+    close threatEnvCursor;
+    set done = 0;
+  end loop threat_loop;
+  close threatCursor;
+
+  set done = 0;
+  set headElement = 1;
+  set buf = concat(buf,'"risks" : [\n');
+  open riskCursor;
+  risk_loop: loop
+    fetch riskCursor into riskId, riskName, threatName, vulName;
+    if done = 1
+    then
+      set buf = concat(buf,"  }\n],\n");
+      leave risk_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"  },\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',riskName,'", "vulnerability" : "',vulName,'", "threat" : "',threatName,'", "tags" : [');
+    set riskCount = riskCount + 1;
+
+    set headElement = 1;
+    open riskTagCursor;
+    riskTag_loop: loop
+      fetch riskTagCursor into tagName;
+      if done = 1
+      then
+        set buf = concat(buf,'],\n    "misusecases" : [\n');
+        leave riskTag_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      set buf = concat(buf,'"',tagName,'"'); 
+    end loop riskTag_loop;
+    close riskTagCursor;
+    set done = 0;
+  
+    set headElement = 1;
+    open mcCursor;
+    mc_loop: loop
+      fetch mcCursor into envName, mcNarrative;
+      if done = 1
+      then
+        set buf = concat(buf,'\n    ]\n');
+        leave mc_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      set buf = concat(buf,'      {"environment" : "',envName,'", "narrative" : "',mcNarrative,'"}');
+    end loop mc_loop;
+    close mcCursor;
+    set done = 0;
+  end loop risk_loop;
+  close riskCursor;
+
+  set buf = concat(buf,'"responses" : [\n');
+  set done = 0;
+  set headElement = 1;
+  open responseCursor;
+  response_loop: loop
+    fetch responseCursor into responseId, responseName, responseType, riskName;
+    if done = 1
+    then
+      set buf = concat(buf,"  }\n],\n");
+      leave response_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"  },\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"risk" : "',riskName,'", "type" : "',responseType,'",\n    "environments" : [\n');
+    set responseCount = responseCount + 1;
+
+    set done = 0;
+    set headElement = 1;
+    open responseEnvCursor;
+    responseEnv_loop: loop
+      fetch responseEnvCursor into envId, envName;
+      if done = 1
+      then
+        set buf = concat(buf,'\n    ]\n');
+        leave responseEnv_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      if responseType = 'Accept'
+      then
+        set buf = concat(buf,'      {"name" : "',envName,'", "type" : "accept", "cost" : "',responseCost(responseId,envId),'", "rationale" : "',responseDescription(responseId,envId),'"}');
+      elseif responseType = 'Transfer'
+      then
+        set buf = concat(buf,'      {"name" : "',envName,'", "type" : "transfer", "rationale" : "',responseDescription(responseId,envId),'", "roles" : [');
+
+        set done = 0;
+        set headElement = 1;
+        open responseRoleCursor;
+        responseRole_loop: loop
+          fetch responseRoleCursor into roleName,roleCost;
+          if done = 1
+          then
+            set buf = concat(buf,']}\n');
+            leave responseRole_loop;
+            set headElement = 1;
+          else
+            if headElement = 1
+            then
+              set headElement = 0;
+            else
+              set buf = concat(buf,",");
+            end if;
+          end if;
+          set buf = concat(buf,'{"name" : "',roleName,'", "cost" : "',roleCost,'"}');
+
+        end loop responseRole_loop;
+        close responseRoleCursor;
+        set done = 0;
+      else
+        set mitType = mitigationType(responseId,envId);
+        if mitType = 'Deter'
+        then
+          set buf = concat(buf,'      {"name" : "',envName,'", "type" : "deter"}\n');
+        elseif mitType = 'Prevent'
+        then
+          set buf = concat(buf,'      {"name" : "',envName,'", "type" : "prevent"}\n');
+        elseif mitType = 'Detect'
+        then
+          set buf = concat(buf,'      {"name" : "',envName,'", "type" : "detect", "point" : "',mitigatePoint(responseId,envId),'"}\n');
+        else
+          set buf = concat(buf,'      {"name" : "',envName,'", "type" : "react", "detection_mechanisms" : [');
+
+          set done = 0;
+          set headElement = 1;
+          open detMechCursor;
+          detMech_loop: loop
+            fetch detMechCursor into assetName;
+            if done = 1
+            then
+              set buf = concat(buf,']}\n');
+              leave detMech_loop;
+              set headElement = 1;
+            else
+              if headElement = 1
+              then
+                set headElement = 0;
+              else
+                set buf = concat(buf,",");
+              end if;
+            end if;
+            set buf = concat(buf,'"',assetName,'"');
+          end loop detMech_loop;
+          close detMechCursor;
+          set done = 0;
+        end if;
+      end if;
+    end loop responseEnv_loop;
+    close responseEnvCursor;
+    set done = 0;
+  end loop response_loop;
+  close responseCursor;
+
+  set buf = concat(buf,'"asset_associations" : [\n');
+  set done = 0;
+  set headElement = 1;
+  open assocCursor;
+  assoc_loop: loop
+    fetch assocCursor into envName, headName, headNav, headAdornment, headNry, headRole, tailRole, tailNry, tailAdornment, tailNav, tailName,assocRationale;
+    if done = 1
+    then
+      set buf = concat(buf,"\n]\n");
+      leave assoc_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"environment" : "',envName,'",  "head_name" : "',headName,'", "head_nav" : "',headNav,'", "head_adornment" : "',headAdornment,'", "head_nry" : "',s2a(headNry),'", "head_role" : "',headRole,'", "tail_role" : "',tailRole,'", "tail_nry" : "',s2a(tailNry),'", "tail_adornment" : "',tailAdornment,'", "tail_nav" : "',tailNav,'", "tail_name" : "',tailName,'", "rationale" : "',assocRationale,'"}');
+    set rshipCount = rshipCount + 1;
+  end loop assoc_loop;
+  close assocCursor;
+  select buf,roleCount,assetCount,vulCount,attackerCount,threatCount,riskCount,responseCount,rshipCount;
+end
+//
+
+create procedure usabilityToJSON()
+begin
+  declare envId int;
+  declare headElement int default 1;
+  declare envName varchar(50);
+  declare personaId int;
+  declare personaName varchar(50);
+  declare pActivities varchar(4000);
+  declare pAttitudes varchar(4000);
+  declare pAptitudes varchar(4000);
+  declare pMotivations varchar(4000);
+  declare pSkills varchar(4000);
+  declare pIntrinsic varchar(4000);
+  declare pContextual varchar(4000);
+  declare pImage varchar(2000);
+  declare isAssumption int;
+  declare pType varchar(50);
+  declare roleName varchar(50);
+  declare personaCount int default 0;
+  declare edName varchar(2000);
+  declare edVersion varchar(20);
+  declare edDate varchar(100);
+  declare edAuthors varchar(200);
+  declare edDesc varchar(2000);
+  declare edCount int default 0;
+  declare drName varchar(200);
+  declare drCount int default 0;
+  declare drCont varchar(200);
+  declare drExcerpt varchar(2000);
+  declare pcId int;
+  declare bvName varchar(50);
+  declare modQual varchar(50);
+  declare pcDesc varchar(2000);
+  declare pcCount int default 0;
+  declare gwrType varchar(20);
+  declare gwrRef varchar(200);
+  declare gwrConcept varchar(50);
+  declare taskId int;
+  declare taskName varchar(200);
+  declare taskCode varchar(100);
+  declare taskAuthor varchar(255);
+  declare taskObjective varchar(2000);
+  declare isTaskAssumption int;
+  declare taskCount int default 0;
+  declare durationValue varchar(50);
+  declare frequencyValue varchar(50);
+  declare demandsValue varchar(50);
+  declare gcValue varchar(50);
+  declare concernName varchar(50);
+  declare sourceName varchar(50);
+  declare sourceNry varchar(10);
+  declare concernLink varchar(50);
+  declare targetNry varchar(10);
+  declare targetName varchar(50);
+  declare buf LONGTEXT default '';
+  declare done int default 0;
+  declare personaCursor cursor for select p.id,p.name,jsonEscaped(p.activities),jsonEscaped(p.attitudes),jsonEscaped(p.aptitudes),jsonEscaped(p.motivations),jsonEscaped(p.skills),jsonEscaped(p.intrinsic),jsonEscaped(p.contextual),p.image,p.assumption_id,pt.name from persona p, persona_type pt where p.persona_type_id = pt.id;
+  declare personaEnvCursor cursor for select ep.environment_id,e.name from environment_persona ep, environment e where ep.persona_id = personaId and ep.environment_id = e.id;
+  declare personaRolesCursor cursor for select r.name from persona_role sr, role r where sr.persona_id = personaId and sr.environment_id = envId and sr.role_id = r.id;
+  declare edCursor cursor for select name,version,publication_date,authors,jsonEscaped(description) from external_document;
+  declare drCursor cursor for select distinct dr.name,ed.name,dr.contributor,jsonEscaped(dr.excerpt) from document_reference dr, external_document ed where dr.document_id = ed.id;
+  declare pcCursor cursor for select pc.id,p.name,bv.name,pc.qualifier,jsonEscaped(pc.description) from persona_characteristic pc, persona p, behavioural_variable bv where pc.persona_id = p.id and pc.variable_id = bv.id order by 2,3;
+
+  declare groundsCursor cursor for
+    select 'document',dr.name,'' from persona_characteristic_document pc, document_reference dr where pc.characteristic_id = pcId and pc.reference_id = dr.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'asset',cr.name,c.name from persona_characteristic_asset pc, asset_reference cr, asset c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.asset_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'attacker',cr.name,c.name from persona_characteristic_attacker pc, attacker_reference cr, attacker c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.attacker_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'countermeasure',cr.name,c.name from persona_characteristic_countermeasure pc, countermeasure_reference cr, countermeasure c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.countermeasure_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'domainproperty',cr.name,c.name from persona_characteristic_domainproperty pc, domainproperty_reference cr, domainproperty c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.domainproperty_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'environment',cr.name,c.name from persona_characteristic_environment pc, environment_reference cr, environment c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.environment_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'goal',cr.name,c.name from persona_characteristic_goal pc, goal_reference cr, goal c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.goal_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'misusecase',cr.name,c.name from persona_characteristic_misusecase pc, misusecase_reference cr, misusecase c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.misusecase_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'obstacle',cr.name,c.name from persona_characteristic_obstacle pc, obstacle_reference cr, obstacle c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.obstacle_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'persona',cr.name,c.name from persona_characteristic_persona pc, persona_reference cr, persona c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.persona_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 0 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    union
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 0 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    union
+    select 'response',cr.name,c.name from persona_characteristic_response pc, response_reference cr, response c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.response_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'risk',cr.name,c.name from persona_characteristic_risk pc, risk_reference cr, risk c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.risk_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'role',cr.name,c.name from persona_characteristic_role pc, role_reference cr, role c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.role_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'task',cr.name,c.name from persona_characteristic_task pc, task_reference cr, task c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.task_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'threat',cr.name,c.name from persona_characteristic_threat pc, threat_reference cr, threat c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.threat_id = c.id and pc.characteristic_reference_type_id = 0
+    union
+    select 'vulnerability',cr.name,c.name from persona_characteristic_vulnerability pc, vulnerability_reference cr, vulnerability c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.vulnerability_id = c.id and pc.characteristic_reference_type_id = 0;
+  declare warrantCursor cursor for
+    select 'document',dr.name,'' from persona_characteristic_document pc, document_reference dr where pc.characteristic_id = pcId and pc.reference_id = dr.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'asset',cr.name,c.name from persona_characteristic_asset pc, asset_reference cr, asset c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.asset_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'attacker',cr.name,c.name from persona_characteristic_attacker pc, attacker_reference cr, attacker c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.attacker_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'countermeasure',cr.name,c.name from persona_characteristic_countermeasure pc, countermeasure_reference cr, countermeasure c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.countermeasure_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'domainproperty',cr.name,c.name from persona_characteristic_domainproperty pc, domainproperty_reference cr, domainproperty c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.domainproperty_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'environment',cr.name,c.name from persona_characteristic_environment pc, environment_reference cr, environment c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.environment_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'goal',cr.name,c.name from persona_characteristic_goal pc, goal_reference cr, goal c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.goal_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'misusecase',cr.name,c.name from persona_characteristic_misusecase pc, misusecase_reference cr, misusecase c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.misusecase_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'obstacle',cr.name,c.name from persona_characteristic_obstacle pc, obstacle_reference cr, obstacle c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.obstacle_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'persona',cr.name,c.name from persona_characteristic_persona pc, persona_reference cr, persona c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.persona_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 1 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    union
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 1 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    union
+    select 'response',cr.name,c.name from persona_characteristic_response pc, response_reference cr, response c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.response_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'risk',cr.name,c.name from persona_characteristic_risk pc, risk_reference cr, risk c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.risk_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'role',cr.name,c.name from persona_characteristic_role pc, role_reference cr, role c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.role_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'task',cr.name,c.name from persona_characteristic_task pc, task_reference cr, task c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.task_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'threat',cr.name,c.name from persona_characteristic_threat pc, threat_reference cr, threat c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.threat_id = c.id and pc.characteristic_reference_type_id = 1
+    union
+    select 'vulnerability',cr.name,c.name from persona_characteristic_vulnerability pc, vulnerability_reference cr, vulnerability c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.vulnerability_id = c.id and pc.characteristic_reference_type_id = 1;
+  declare rebuttalCursor cursor for
+    select 'document',dr.name,'' from persona_characteristic_document pc, document_reference dr where pc.characteristic_id = pcId and pc.reference_id = dr.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'asset',cr.name,c.name from persona_characteristic_asset pc, asset_reference cr, asset c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.asset_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'attacker',cr.name,c.name from persona_characteristic_attacker pc, attacker_reference cr, attacker c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.attacker_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'countermeasure',cr.name,c.name from persona_characteristic_countermeasure pc, countermeasure_reference cr, countermeasure c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.countermeasure_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'domainproperty',cr.name,c.name from persona_characteristic_domainproperty pc, domainproperty_reference cr, domainproperty c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.domainproperty_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'environment',cr.name,c.name from persona_characteristic_environment pc, environment_reference cr, environment c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.environment_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'goal',cr.name,c.name from persona_characteristic_goal pc, goal_reference cr, goal c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.goal_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'misusecase',cr.name,c.name from persona_characteristic_misusecase pc, misusecase_reference cr, misusecase c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.misusecase_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'obstacle',cr.name,c.name from persona_characteristic_obstacle pc, obstacle_reference cr, obstacle c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.obstacle_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'persona',cr.name,c.name from persona_characteristic_persona pc, persona_reference cr, persona c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.persona_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, asset_requirement ar, asset a where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 2 and c.id = ar.requirement_id and ar.asset_id = a.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    union
+    select 'requirement',cr.name,c.name from persona_characteristic_requirement pc, requirement_reference cr, requirement c, environment_requirement er, environment e where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.requirement_id = c.id and pc.characteristic_reference_type_id = 2 and c.id = er.requirement_id and er.environment_id = e.id and c.version = (select max(i.version) from requirement i where i.id = c.id) 
+    union
+    select 'response',cr.name,c.name from persona_characteristic_response pc, response_reference cr, response c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.response_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'risk',cr.name,c.name from persona_characteristic_risk pc, risk_reference cr, risk c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.risk_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'role',cr.name,c.name from persona_characteristic_role pc, role_reference cr, role c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.role_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'task',cr.name,c.name from persona_characteristic_task pc, task_reference cr, task c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.task_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'threat',cr.name,c.name from persona_characteristic_threat pc, threat_reference cr, threat c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.threat_id = c.id and pc.characteristic_reference_type_id = 2
+    union
+    select 'vulnerability',cr.name,c.name from persona_characteristic_vulnerability pc, vulnerability_reference cr, vulnerability c where pc.characteristic_id = pcId and pc.reference_id = cr.id and cr.vulnerability_id = c.id and pc.characteristic_reference_type_id = 2;
+  declare taskCursor cursor for select id,name,jsonEscaped(short_code),jsonEscaped(author),jsonEscaped(objective),assumption_id from task;
+  declare taskEnvCursor cursor for select et.environment_id,e.name from environment_task et, environment e where et.task_id = taskId and et.environment_id = e.id;  
+  declare taskPersonaCursor cursor for select p.name,duv.name,fv.name,dev.name,gv.name from persona p, task_persona tp, security_property_value duv, security_property_value fv, security_property_value dev, security_property_value gv where tp.task_id = taskId and tp.environment_id = envId and tp.persona_id = p.id and tp.duration_id = duv.id and tp.frequency_id = fv.id and tp.demands_id = dev.id and tp.goalsupport_id = gv.id;
+  declare taskConcernCursor cursor for select a.name from task_asset tc, asset a where tc.task_id = taskId and tc.environment_id = envId and tc.asset_id = a.id;
+  declare taskConcernAssocCursor cursor for select sa.name,smt.name,ca.link,ta.name,tmt.name from task_concernassociation ca, asset sa, asset ta, multiplicity_type smt, multiplicity_type tmt where ca.task_id = taskId and ca.environment_id = envId and ca.source_id = sa.id and ca.source_multiplicity_id = smt.id and ca.target_id = ta.id and ca.target_multiplicity_id = tmt.id;
+
+  declare continue handler for not found set done = 1;
+
+
+  set buf = concat(buf,'"personas" : [\n');
+  set headElement = 1;
+  open personaCursor;
+  persona_loop: loop
+    fetch personaCursor into personaId,personaName,pActivities,pAttitudes,pAptitudes,pMotivations,pSkills,pIntrinsic,pContextual,pImage,isAssumption,pType;
+    if done = 1
+    then
+      set buf = concat(buf,"  }\n],\n");
+      leave persona_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"  },\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',personaName,'", "type" : "',pType,'\", "assumption_persona" : "',b2a(isAssumption),'", "image" : "',pImage,'", "activities" : "',pActivities,'", "attitudes" : "',pAttitudes,'", "aptitudes" : "',pAptitudes,'", "motivations" : "',pMotivations,'", "skills" : "',pSkills,'", "intrinsic" : "',pIntrinsic,'", "contextual" : "',pContextual,'",\n    "environments" : [');
+    set personaCount = personaCount + 1;
+
+    set headElement = 1;
+    open personaEnvCursor;
+    personaEnv_loop: loop
+      fetch personaEnvCursor into envId, envName;
+      if done = 1
+      then
+        set buf = concat(buf,'\n      }\n    ]\n');
+        leave personaEnv_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,"\n      },\n");
+        end if;
+      end if;
+      set buf = concat(buf,'      {"name" : "',envName,'", "is_direct" : "',b2a(personaDirect(personaId,envId)),'", "narrative" : "',personaNarrative(personaId,envId),'", "roles" : [');
+
+      set done = 0;
+      set headElement = 1;
+      open personaRolesCursor;
+      personaRoles_loop: loop
+        fetch personaRolesCursor into roleName;
+        if done = 1
+        then
+          set buf = concat(buf,']');
+          leave personaRoles_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'"',roleName,'"');
+      end loop personaRoles_loop;
+      close personaRolesCursor;
+      set done = 0;
+    end loop personaEnv_loop;
+    close personaEnvCursor;
+    set done = 0;
+  end loop persona_loop;
+  close personaCursor;
+
+  set buf = concat(buf,'"external_documents" : [\n');
+  set headElement = 1;
+  set done = 0;
+  open edCursor;
+  ed_loop : loop
+    fetch edCursor into edName,edVersion,edDate,edAuthors,edDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"\n],\n");
+      leave ed_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',edName,'", "version" : "',edVersion,'", "date" : "',edDate,'", "authors" : "',edAuthors,'", "description" : "',edDesc,'"}');
+    set edCount = edCount + 1; 
+  end loop ed_loop;
+  close edCursor;
+
+  set buf = concat(buf,'"document_references" : [\n');
+  set headElement = 1;
+  set done = 0;
+  open drCursor;
+  dr_loop : loop
+    fetch drCursor into drName,edName,drCont,drExcerpt;
+    if done = 1
+    then
+      set buf = concat(buf,"\n],\n");
+      leave dr_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',drName,'", "contributor" : "',drCont,'", "document" : "',edName,'", "excerpt" : "',drExcerpt,'"}');
+
+    set drCount = drCount + 1; 
+  end loop dr_loop;
+  close drCursor;
+
+
+  set done = 0;
+  set buf = concat(buf,'"persona_characteristics" : [\n');
+  set headElement = 1;
+  open pcCursor;
+  pc_loop : loop
+    fetch pcCursor into pcId, personaName, bvName, modQual, pcDesc;
+    if done = 1
+    then
+      set buf = concat(buf,"\n  }\n],\n");
+      leave pc_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"\n  },\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"persona" : "',personaName,'", "behavioural_variable" : "',replace(bvName,' ','_'),'", "modal_qualifier" : "',modQual,'" ,"definition" : "',pcDesc,'",\n    "grounds" : [');
+    set pcCount = pcCount + 1;
+    set headElement = 1;
+    open groundsCursor;
+    grounds_loop: loop
+      fetch groundsCursor into gwrType, gwrRef, gwrConcept;
+      if done = 1
+      then
+        set buf = concat(buf,'],\n    "warrant" : [');
+        leave grounds_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      if gwrType = 'document'
+      then
+        set buf = concat(buf,'{"type" : "',gwrType,'", "reference" : "',gwrRef,'"}');
+      else
+        set buf = concat(buf,'{"type" : "',gwrType,'", "artifact" : "',gwrConcept,'", "reference=" : "',gwrRef,'"}');
+      end if;
+    end loop grounds_loop;
+    close groundsCursor;
+    set done = 0;
+
+    set headElement = 1;
+    open warrantCursor;
+    warrant_loop: loop
+      fetch warrantCursor into gwrType, gwrRef, gwrConcept;
+      if done = 1
+      then
+        set buf = concat(buf,'],\n    "rebuttal" : [');
+        leave warrant_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      if gwrType = 'document'
+      then
+        set buf = concat(buf,'{"type" : "',gwrType,'", "reference" : "',gwrRef,'"}');
+      else
+        set buf = concat(buf,'{"type" : "',gwrType,'", "artifact" : "',gwrConcept,'", "reference=" : "',gwrRef,'"}');
+      end if;
+    end loop warrant_loop;
+    close warrantCursor;
+    set done = 0;
+
+    set headElement = 1;
+    open rebuttalCursor;
+    rebuttal_loop: loop
+      fetch rebuttalCursor into gwrType, gwrRef, gwrConcept;
+      if done = 1
+      then
+        set buf = concat(buf,']');
+        leave rebuttal_loop;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",");
+        end if;
+      end if;
+      if gwrType = 'document'
+      then
+        set buf = concat(buf,'{"type" : "',gwrType,'", "reference" : "',gwrRef,'"}');
+      else
+        set buf = concat(buf,'{"type" : "',gwrType,'", "artifact" : "',gwrConcept,'", "reference=" : "',gwrRef,'"}');
+      end if;
+    end loop rebuttal_loop;
+    close rebuttalCursor;
+    set done = 0; 
+    set headElement = 0;
+  end loop pc_loop;
+  close pcCursor;
+
+  set done = 0;
+  set headElement = 1;
+  set buf = concat(buf,'"tasks" : [\n');
+  open taskCursor;
+  task_loop : loop
+    fetch taskCursor into taskId,taskName,taskCode,taskAuthor,taskObjective,isTaskAssumption;
+    if done = 1
+    then
+      set buf = concat(buf,"}\n]\n");
+      leave task_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"},\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',taskName,'", "code" : "',taskCode,'", "author" : "',taskAuthor,'", "assumption_task" : "',b2a(isTaskAssumption),'", "objective" : "',taskObjective,'", "environments": [\n');
+    set taskCount = taskCount + 1; 
+
+    set done = 0;
+    set headElement = 1;
+    open taskEnvCursor;
+    taskEnv_loop: loop
+      fetch taskEnvCursor into envId,envName;
+      if done = 1
+      then
+        set buf = concat(buf,'\n  ]');
+        leave taskEnv_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      set buf = concat(buf,'    {"name" : "',envName,'", "dependencies" : "',jsonEscaped(taskDependencies(taskId,envId)),'",');
+      set buf = concat(buf,'"narrative" : "',jsonEscaped(taskNarrative(taskId,envId)),'",');
+      set buf = concat(buf,'"consequences" : "',jsonEscaped(taskConsequences(taskId,envId)),'",');
+      set buf = concat(buf,'"benefits" : "',jsonEscaped(taskBenefits(taskId,envId)),'",');
+      set buf = concat(buf,'"participants" : [');
+
+      set headElement = 1;
+      open taskPersonaCursor;
+      taskPersona_loop: loop
+        fetch taskPersonaCursor into personaName,durationValue,frequencyValue,demandsValue,gcValue;
+        if done = 1
+        then
+          set buf = concat(buf,'], "assets" : [');
+          leave taskPersona_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'{"persona" : "',personaName,'", "duration" : "',durationLabel(durationValue),'", "frequency" : "',frequencyLabel(frequencyValue),'", "demands" : "',demandsValue,'", "goal_conflict" : "',gcValue,'"}');
+      end loop taskPersona_loop;
+      close taskPersonaCursor;
+      set done = 0;
+
+      set headElement = 1;
+      open taskConcernCursor;
+      taskConcern_loop: loop
+        fetch taskConcernCursor into concernName;
+        if done = 1
+        then
+          set buf = concat(buf,'], "associations" : [');
+          leave taskConcern_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'"',concernName,'"');
+      end loop taskConcern_loop;
+      close taskConcernCursor;
+      set done = 0;
+
+
+      set headElement = 1;
+      open taskConcernAssocCursor;
+      taskConcernAssoc_loop: loop
+        fetch taskConcernAssocCursor into sourceName,sourceNry,concernLink,targetName,targetNry;
+        if done = 1
+        then
+          set buf = concat(buf,']}');
+          leave taskConcernAssoc_loop;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        if done = 1
+        then
+          leave taskConcernAssoc_loop;
+        end if;
+        set buf = concat(buf,'{"source_name" : "',sourceName,'", "source_nry" : "',s2a(sourceNry),'", "link_name" : "',concernLink,'", "target_nry" : "',s2a(targetNry),'", "target_name" : "',targetName,'"}');
+      end loop taskConcernAssoc_loop;
+      close taskConcernAssocCursor;
+      set done = 0;
+      set headElement = 0;
+    end loop taskEnv_loop;
+    close taskEnvCursor;
+    set done = 0;
+  end loop task_loop;
+  close taskCursor;
+  select buf,personaCount,edCount,drCount,pcCount,taskCount;
+end
+//
+
+create procedure goalsToJSON()
+begin
+  declare headElement int default 1;
+  declare dpName varchar(255);
+  declare dpDesc varchar(1000);
+  declare dpType varchar(50);
+  declare dpOrig varchar(100);
+  declare dpCount int default 0;
+  declare goalId int;
+  declare goalName varchar(100);
+  declare goalOrig varchar(50);
+  declare obsId int;
+  declare obsName varchar(100);
+  declare obsOrig varchar(50);
+  declare envId int;
+  declare envName varchar(50);
+  declare concernName varchar(50);
+  declare sourceName varchar(50);
+  declare sourceNry varchar(10);
+  declare concernLink varchar(50);
+  declare targetNry varchar(10);
+  declare targetName varchar(50);
+  declare refName varchar(50);
+  declare refType varchar(50);
+  declare reqLabel int;
+  declare reqType varchar(255);
+  declare reqPriority int;
+  declare reqName longtext;
+  declare reqDesc longtext;
+  declare reqRat longtext;
+  declare reqFc longtext;
+  declare reqOrig longtext;
+  declare ucId int;
+  declare ucName varchar(50);
+  declare ucAuthor varchar(255);
+  declare ucShortCode varchar(100);
+  declare ucDesc varchar(2000);
+  declare ucPreCond varchar(2000);
+  declare ucPostCond varchar(2000);
+  declare stepNo int;
+  declare stepDesc varchar(2000);
+  declare ucExcName varchar(200);
+  declare excDim varchar(20);
+  declare ucExcRelValue varchar(50);
+  declare ucExcCategory varchar(50);
+  declare ucExcDesc varchar(2000);
+  declare ucCount int default 0;
+  declare cmId int;
+  declare cmName varchar(100);
+  declare cmDesc varchar(4000);
+  declare cmType varchar(50);
+  declare effValue varchar(50);
+  declare roleName varchar(50);
+  declare taskName varchar(200);
+  declare personaName varchar(50);
+  declare durValue varchar(50);
+  declare freqValue varchar(50);
+  declare demValue varchar(50);
+  declare gcValue varchar(50);
+  declare cProperty varchar(50);
+  declare iProperty varchar(50);
+  declare avProperty varchar(50);
+  declare acProperty varchar(50);
+  declare anProperty varchar(50);
+  declare panProperty varchar(50);
+  declare unlProperty varchar(50);
+  declare unoProperty varchar(50);
+  declare cRationale varchar(4000);
+  declare iRationale varchar(4000);
+  declare avRationale varchar(4000);
+  declare acRationale varchar(4000);
+  declare anRationale varchar(4000);
+  declare panRationale varchar(4000);
+  declare unlRationale varchar(4000);
+  declare unoRationale varchar(4000);
+  declare cmRationale varchar(4000);
+  declare probRationale varchar(4000);
+  declare obsProb float;
+  declare trName varchar(50);
+  declare goalCount int default 0;
+  declare obsCount int default 0;
+  declare reqCount int default 0;
+  declare cmCount int default 0;
+  declare tagName varchar(255);
+  declare buf LONGTEXT default '';
+  declare done int default 0;
+  declare dpCursor cursor for select dp.name,dp.description,dpt.name,dp.originator from domainproperty dp, domainproperty_type dpt where dp.domainproperty_type_id = dpt.id;
+  declare goalCursor cursor for select id,name,originator from goal;
+  declare goalEnvCursor cursor for select eg.environment_id,e.name from environment_goal eg, environment e where eg.goal_id = goalId and eg.environment_id = e.id;
+  declare goalConcernCursor cursor for select a.name from goal_concern gc, asset a where gc.goal_id = goalId and gc.environment_id = envId and gc.asset_id = a.id;
+  declare goalConcernAssocCursor cursor for select sa.name,smt.name,ca.link,ta.name,tmt.name from goal_concernassociation ca, asset sa, asset ta, multiplicity_type smt, multiplicity_type tmt where ca.goal_id = goalId and ca.environment_id = envId and ca.source_id = sa.id and ca.source_multiplicity_id = smt.id and ca.target_id = ta.id and ca.target_multiplicity_id = tmt.id;
+  declare obsCursor cursor for select id,name,originator from obstacle;
+  declare obsEnvCursor cursor for select eo.environment_id,e.name from environment_obstacle eo, environment e where eo.obstacle_id = obsId and eo.environment_id = e.id;
+  declare obsConcernCursor cursor for select a.name from obstacle_concern oc, asset a where oc.obstacle_id = obsId and oc.environment_id = envId and oc.asset_id = a.id;
+  declare reqCursor cursor for
+    select a.name,'asset',o.label,rt.name,o.priority,o.name,o.description,o.rationale,o.fit_criterion,o.originator from requirement o, asset_requirement ar, asset a, requirement_type rt where o.version = (select max(i.version) from requirement i where i.id = o.id) and o.type = rt.id and o.id = ar.requirement_id and ar.asset_id = a.id 
+    union
+    select e.name,'environment',o.label,rt.name,o.priority,o.name,o.description,o.rationale,o.fit_criterion,o.originator from requirement o, environment_requirement er, environment e, requirement_type rt where o.version = (select max(i.version) from requirement i where i.id = o.id) and o.type = rt.id and o.id = er.requirement_id and er.environment_id = e.id; 
+  declare ucCursor cursor for select id,name,author,short_code,description from usecase;
+  declare ucEnvCursor cursor for select eu.environment_id,e.name from environment_usecase eu, environment e where eu.usecase_id = ucId and eu.environment_id = e.id;
+  declare ucActorCursor cursor for select r.name from usecase_role ur, role r where ur.usecase_id = ucId and ur.role_id = r.id;
+  declare ucStepCursor cursor for select step_no,description from usecase_step where usecase_id = ucId and environment_id = envId order by 1;
+  declare ucStepExceptionCursor cursor for
+    select usne.name, 'None', 'None', 'None', usne.description from usecase_step_none_exception usne where usne.usecase_id = ucId and usne.environment_id = envId and usne.step_no = stepNo
+    union
+    select usge.name, 'Goal', g.name, oct.name, usge.description from usecase_step_goal_exception usge, goal g, obstacle_category_type oct where usge.usecase_id = ucId and usge.environment_id = envId and usge.step_no = stepNo and usge.goal_id = g.id and usge.category_type_id = oct.id
+    union
+    select usge.name, 'Requirement', concat(a.short_code,'-',r.label), oct.name, usge.description from usecase_step_requirement_exception usge, requirement r, asset_requirement ar, asset a, obstacle_category_type oct where usge.usecase_id = ucId and usge.environment_id = envId and usge.step_no = stepNo and usge.goal_id = r.id and r.id = ar.requirement_id and ar.asset_id = a.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and usge.category_type_id = oct.id
+    union
+    select usge.name, 'Requirement', concat(e.short_code,'-',r.label), oct.name, usge.description from usecase_step_requirement_exception usge, requirement r, environment_requirement er, environment e, obstacle_category_type oct where usge.usecase_id = ucId and usge.environment_id = envId and usge.step_no = stepNo and usge.goal_id = r.id and r.id = er.requirement_id and er.environment_id = e.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and usge.category_type_id = oct.id;
+  declare ucStepTagCursor cursor for select t.name from usecase_step_tag ust, tag t where ust.usecase_id = ucId and ust.environment_id = envId and ust.step_no = stepNo and ust.tag_id = t.id order by 1;
+  declare cmCursor cursor for select c.id,c.name,c.description,at.name from countermeasure c,asset_type at where c.countermeasure_type_id = at.id;
+  declare cmEnvCursor cursor for select ec.environment_id,e.name from environment_countermeasure ec, environment e where ec.countermeasure_id = cmId and ec.environment_id = e.id;
+  declare cmReqsCursor cursor for
+    select distinct r.name from requirement_countermeasure rc, requirement r where rc.countermeasure_id = cmId and rc.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id) and rc.environment_id = envId;
+
+  declare cmTargetsCursor cursor for
+    select t.name,te.name,ctt.effectiveness_rationale from countermeasure_threat_target ctt, countermeasure_threat_response_target ctrt, threat t, target_effectiveness te,response r where ctt.countermeasure_id = cmId and ctt.environment_id = envId and ctt.threat_id = t.id and ctt.countermeasure_id = ctrt.countermeasure_id and ctt.environment_id = ctrt.environment_id and ctt.threat_id = ctrt.threat_id and ctrt.response_id = r.id and ctt.effectiveness_id = te.id
+    union
+    select v.name,ve.name,cvt.effectiveness_rationale from countermeasure_vulnerability_target cvt, countermeasure_vulnerability_response_target cvrt, vulnerability v, target_effectiveness ve,response r where cvt.countermeasure_id = cmId and cvt.environment_id = envId and cvt.vulnerability_id = v.id and cvt.countermeasure_id = cvrt.countermeasure_id and cvt.environment_id = cvrt.environment_id and cvt.vulnerability_id = cvrt.vulnerability_id and cvrt.response_id = r.id and cvt.effectiveness_id = ve.id;
+
+  declare cmRolesCursor cursor for select r.name from countermeasure_role cr, role r where cr.countermeasure_id = cmId and cr.environment_id = envId and cr.role_id = r.id;
+
+  declare cmPersonasCursor cursor for select t.name,p.name,duv.name,fv.name,dev.name,gv.name from countermeasure_task_persona ctp, task t, persona p,securityusability_property_value duv, securityusability_property_value fv, securityusability_property_value dev, securityusability_property_value gv where ctp.countermeasure_id = cmId and ctp.environment_id = envId and ctp.task_id = t.id and ctp.persona_id = p.id and ctp.duration_id = duv.id and ctp.frequency_id = fv.id and ctp.demands_id = dev.id and ctp.goalsupport_id = gv.id;
+  declare targetResponseCursor cursor for 
+     select r.name from response r, countermeasure_vulnerability_response_target cvrt, environment_response er, vulnerability v where cvrt.countermeasure_id = cmId and cvrt.environment_id = envId and cvrt.response_id = er.response_id and cvrt.environment_id = er.environment_id and er.response_id = r.id and cvrt.vulnerability_id = v.id and v.name = targetName
+     union
+     select r.name from response r, countermeasure_threat_response_target ctrt, environment_response er, threat t where ctrt.countermeasure_id = cmId and ctrt.environment_id = envId and ctrt.response_id = er.response_id and ctrt.environment_id = er.environment_id and er.response_id = r.id and ctrt.threat_id = t.id and t.name = targetName;
+
+  declare continue handler for not found set done = 1;
+
+  set buf = concat(buf,'"domain_properties" : [\n');
+  set headElement = 1;
+  open dpCursor;
+  dp_loop: loop
+    fetch dpCursor into dpName, dpDesc, dpType,dpOrig;
+    if done = 1
+    then
+      set buf = concat(buf,"\n],\n");
+      leave dp_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,",\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',dpName,'", "type" : "',dpType,'", "originator" : "',dpOrig,'", "definition" : "',dpDesc,'"}');
+    set dpCount = dpCount + 1;
+  end loop dp_loop;
+  close dpCursor;
+
+  set done = 0;
+  set headElement = 1;
+  set buf = concat(buf,'"goals" : [\n');
+  open goalCursor;
+  goal_loop: loop
+    fetch goalCursor into goalId, goalName, goalOrig;
+    if done = 1
+    then
+      set buf = concat(buf,"}\n]\n");
+      leave goal_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"},\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',goalName,'", "originator" : "',goalOrig,'", "environments" : [\n');
+    set goalCount = goalCount + 1;
+
+    open goalEnvCursor;
+    goalEnv_loop: loop
+      fetch goalEnvCursor into envId, envName;
+      if done = 1
+      then
+        set buf = concat(buf,'\n  ]');
+        leave goalEnv_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      set buf = concat(buf,'    {"name" : "',envName,'", "category" : "',goal_category(goalId,envId),'", "priority" : "',goal_priority(goalId,envId),'", "definition" : "',goal_definition(goalId,envId),'", "fit_criterion" : "',goal_fitcriterion(goalId,envId),'", "issue" : "',goal_issue(goalId,envId),'", "concerns" : [');
+
+      open goalConcernCursor;
+      goalConcern_loop: loop
+        fetch goalConcernCursor into concernName;
+        if done = 1
+        then
+          set buf = concat(buf,'], "associations" : [');
+          leave goalConcern_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'"',concernName,'"');
+      end loop goalConcern_loop;
+      close goalConcernCursor;
+      set done = 0;
+
+      open goalConcernAssocCursor;
+      goalConcernAssoc_loop: loop
+        fetch goalConcernAssocCursor into sourceName,sourceNry,concernLink,targetName,targetNry;
+        if done = 1
+        then
+          set buf = concat(buf,']}');
+          leave goalConcernAssoc_loop;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'{"source_name" : "',sourceName,'", "source_nry" : "',s2a(sourceNry),'", "link_name" : "',concernLink,'", "target_nry" : "',s2a(targetNry),'", "target_name" : "',targetName,'"}');
+      end loop goalConcernAssoc_loop;
+      close goalConcernAssocCursor;
+      set done = 0;
+    end loop goalEnv_loop;
+    close goalEnvCursor;
+    set done = 0;
+  end loop goal_loop;
+  close goalCursor;
+
+  set done = 0;
+  set headElement = 1;
+  set buf = concat(buf,'"obstacles" : [\n');
+
+  open obsCursor;
+  obs_loop: loop
+    fetch obsCursor into obsId, obsName,obsOrig;
+    if done = 1
+    then
+      set buf = concat(buf,"}\n]\n");
+      leave obs_loop;
+      set headElement = 1;
+    else
+      if headElement = 1
+      then
+        set headElement = 0;
+      else
+        set buf = concat(buf,"},\n");
+      end if;
+    end if;
+    set buf = concat(buf,'  {"name" : "',obsName,'", "originator" : "',obsOrig,'", "environments" : [\n');
+    set obsCount = obsCount + 1;
+
+    set done = 0;
+    set headElement = 1;
+    open obsEnvCursor;
+    obsEnv_loop: loop
+      fetch obsEnvCursor into envId, envName;
+      if done = 1
+      then
+        set buf = concat(buf,'\n  ]');
+        leave obsEnv_loop;
+        set headElement = 1;
+      else
+        if headElement = 1
+        then
+          set headElement = 0;
+        else
+          set buf = concat(buf,",\n");
+        end if;
+      end if;
+      set buf = concat(buf,'    {"name" : "',envName,'", "category" : "',replace(obstacle_category(obsId,envId),' ','_'),'", "definition" : "',obstacle_definition(obsId,envId),'", "concerns" : [');
+
+      set done = 0;
+      set headElement = 1;
+      open obsConcernCursor;
+      obsConcern_loop: loop
+        fetch obsConcernCursor into concernName;
+        if done = 1
+        then
+          set buf = concat(buf,'],');
+          leave obsConcern_loop;
+          set headElement = 1;
+        else
+          if headElement = 1
+          then
+            set headElement = 0;
+          else
+            set buf = concat(buf,",");
+          end if;
+        end if;
+        set buf = concat(buf,'"',concernName,'"');
+      end loop obsConcern_loop;
+      close obsConcernCursor;
+      set done = 0;
+
+      select probability into obsProb from obstacle_definition where obstacle_id = obsId and environment_id = envId;
+      select ifnull(rationale,'None') into probRationale from obstacle_definition where obstacle_id = obsId and environment_id = envId;
+      set buf = concat(buf,'"probability" : "',obsProb,'", "probability_rationale" : "',probRationale,'"}');
+    end loop obsEnv_loop;
+    close obsEnvCursor;
+    set done = 0;
+  end loop obs_loop;
+  close obsCursor;
+  set done = 0;
+
+  open reqCursor;
+  req_loop: loop
+    fetch reqCursor into refName,refType,reqLabel,reqType,reqPriority,reqName,reqDesc,reqRat,reqFc,reqOrig;
+    if done = 1
+    then
+      leave req_loop;
+    end if;
+    set buf = concat(buf,'<requirement name=\"',reqName,'\" reference=\"',refName,'\" reference_type=\"',refType,'\" label=\"',reqLabel,'\" type=\"',replace(reqType,' ','_'),'\" priority=\"',reqPriority,'\" >\n  <description>',reqDesc,'</description>\n  <rationale>',reqRat,'</rationale>\n  <fit_criterion>',reqFc,'</fit_criterion>\n  <originator>',reqOrig,'</originator>\n</requirement>\n');
+    set reqCount = reqCount + 1;
+  end loop req_loop;
+  close reqCursor;
+  set done = 0;
+
+  set done = 0;
+  open ucCursor;
+  uc_loop: loop
+    fetch ucCursor into ucId,ucName,ucAuthor,ucShortCode,ucDesc;
+    if done = 1
+    then
+      leave uc_loop;
+    end if;
+    set buf = concat(buf,'<usecase name=\"',ucName,'\" author=\"',ucAuthor,'\" code=\"',ucShortCode,'\" >\n  <description>',ucDesc,'</description>\n');
+    set ucCount = ucCount + 1;
+
+    open ucActorCursor;
+    ucActor_loop: loop
+      fetch ucActorCursor into roleName;
+      if done = 1
+      then
+        leave ucActor_loop;
+      end if;
+      set buf = concat(buf,'  <actor name=\"',roleName,'\" />\n');
+    end loop ucActor_loop;
+    close ucActorCursor;
+    set done = 0;
+
+    open ucEnvCursor;
+    ucEnv_loop: loop
+      fetch ucEnvCursor into envId,envName;
+      if done = 1
+      then
+        leave ucEnv_loop;
+      end if;
+      select preconditions into ucPreCond from usecase_conditions where usecase_id = ucId and environment_id = envId;
+      set buf = concat(buf,'  <usecase_environment name=\"',envName,'\" >\n    <preconditions>',ucPreCond,'</preconditions>\n    <flow>\n');
+
+      open ucStepCursor;
+      ucStep_loop: loop
+        fetch ucStepCursor into stepNo, stepDesc;
+        if done = 1
+        then
+          leave ucStep_loop;
+        end if; 
+        set buf = concat(buf,'      <step number=\"',stepNo,'\" description=\"',stepDesc,'\" >\n');
+
+
+        open ucStepTagCursor;
+        ucStepTag_loop: loop
+          fetch ucStepTagCursor into tagName;
+          if done = 1
+          then
+            leave ucStepTag_loop;
+          end if;
+          set buf = concat(buf,'        <tag name=\"',tagName,'\" />\n'); 
+        end loop ucStepTag_loop;
+        close ucStepTagCursor;
+        set done = 0;
+
+        open ucStepExceptionCursor;
+        ucStepException_loop: loop
+          fetch ucStepExceptionCursor into ucExcName,excDim,ucExcRelValue,ucExcCategory,ucExcDesc;
+          if done = 1
+          then
+            leave ucStepException_loop;
+          end if;
+          set buf = concat(buf,'        <exception name=\"',ucExcName,'\" type=\"',excDim,'\" value=\"',ucExcRelValue,'\" category=\"',replace(ucExcCategory,' ','_'),'\" >\n          <definition>',ucExcDesc,'</definition>\n        </exception>\n');
+        end loop ucStepException_loop;
+        close ucStepExceptionCursor;
+        set done = 0;
+
+        set buf = concat(buf,'      </step>\n');
+      end loop ucStep_loop;
+      close ucStepCursor;
+      set done = 0;
+   
+      set buf = concat(buf,'    </flow>\n');
+      select postconditions into ucPostCond from usecase_conditions where usecase_id = ucId and environment_id = envId;
+      set buf = concat(buf,'    <postconditions>',ucPostCond,'</postconditions>\n');
+      set buf = concat(buf,'  </usecase_environment>\n');
+    end loop ucEnv_loop;
+    close ucEnvCursor;
+    set done = 0;
+
+    set buf = concat(buf,'</usecase>\n');
+  end loop uc_loop;
+  close ucCursor;
+
+  open cmCursor;
+  cm_loop: loop
+    fetch cmCursor into cmId, cmName, cmDesc, cmType;
+    if done = 1
+    then
+      leave cm_loop;
+    end if;
+    set buf = concat(buf,'<countermeasure name=\"',cmName,'\" type=\"',cmType,'\" >\n  <description>',cmDesc,'</description>\n');
+    set cmCount = cmCount + 1;
+
+    open cmEnvCursor;
+    cmEnv_loop: loop
+      fetch cmEnvCursor into envId, envName;
+      if done = 1
+      then
+        leave cmEnv_loop;
+      end if;
+      set buf = concat(buf,'  <countermeasure_environment name=\"',envName,'\" cost=\"',countermeasureCost(cmId,envId),'\" >\n');
+
+      open cmReqsCursor;
+      cmReqs_loop: loop
+        fetch cmReqsCursor into reqName;
+        if done = 1
+        then
+          leave cmReqs_loop;
+        end if;
+        set buf = concat(buf,'    <countermeasure_requirement name=\"',reqName,'\" />\n');
+      end loop cmReqs_loop;
+      close cmReqsCursor;
+      set done = 0;
+
+      open cmTargetsCursor;
+      cmTargets_loop: loop
+        fetch cmTargetsCursor into targetName,effValue,cmRationale;
+        if done = 1
+        then
+          leave cmTargets_loop;
+        end if;
+        set buf = concat(buf,'    <target name=\"',targetName,'\" effectiveness=\"',effValue,'\" >\n');
+
+        open targetResponseCursor;
+        tr_loop: loop
+          fetch targetResponseCursor into trName;
+          if done = 1
+          then
+            leave tr_loop;
+          end if;
+          set buf = concat(buf,'      <target_response name=\"',trName,'\" />\n');
+        end loop tr_loop;
+        close targetResponseCursor;
+        set done = 0;        
+
+        set buf = concat(buf,'      <rationale>',cmRationale,'</rationale>\n    </target>\n');
+      end loop cmTargets_loop;
+      close cmTargetsCursor;
+      set done = 0;
+
+      select spv.name,cp.property_rationale into cProperty,cRationale from countermeasure_property cp, security_property_value spv where cp.countermeasure_id = cmId and cp.property_id = 0 and cp.environment_id = envId and cp.property_value_id = spv.id;
+      select spv.name,cp.property_rationale into iProperty,iRationale from countermeasure_property cp, security_property_value spv where cp.countermeasure_id = cmId and cp.property_id = 1 and cp.environment_id = envId and cp.property_value_id = spv.id;
+      select spv.name,cp.property_rationale into avProperty,avRationale from countermeasure_property cp, security_property_value spv where cp.countermeasure_id = cmId and cp.property_id = 2 and cp.environment_id = envId and cp.property_value_id = spv.id;
+      select spv.name,cp.property_rationale into acProperty,acRationale from countermeasure_property cp, security_property_value spv where cp.countermeasure_id = cmId and cp.property_id = 3 and cp.environment_id = envId and cp.property_value_id = spv.id;
+      select spv.name,cp.property_rationale into anProperty,anRationale from countermeasure_property cp, security_property_value spv where cp.countermeasure_id = cmId and cp.property_id = 4 and cp.environment_id = envId and cp.property_value_id = spv.id;
+      select spv.name,cp.property_rationale into panProperty,panRationale from countermeasure_property cp, security_property_value spv where cp.countermeasure_id = cmId and cp.property_id = 5 and cp.environment_id = envId and cp.property_value_id = spv.id;
+      select spv.name,cp.property_rationale into unlProperty,unlRationale from countermeasure_property cp, security_property_value spv where cp.countermeasure_id = cmId and cp.property_id = 6 and cp.environment_id = envId and cp.property_value_id = spv.id;
+      select spv.name,cp.property_rationale into unoProperty,unoRationale from countermeasure_property cp, security_property_value spv where cp.countermeasure_id = cmId and cp.property_id = 7 and cp.environment_id = envId and cp.property_value_id = spv.id;
+      if cProperty != 'None'
+      then
+        set buf = concat(buf,'    <mitigating_property name="confidentiality" value=\"',cProperty,'\">\n      <rationale>',cRationale,'</rationale>\n    </mitigating_property>\n');
+      end if;
+      if iProperty != 'None'
+      then
+        set buf = concat(buf,'    <mitigating_property name="integrity" value=\"',iProperty,'\">\n      <rationale>',iRationale,'</rationale>\n    </mitigating_property>\n');
+      end if;
+      if avProperty != 'None'
+      then
+        set buf = concat(buf,'    <mitigating_property name="availability" value=\"',avProperty,'\">\n      <rationale>',avRationale,'</rationale>\n    </mitigating_property>\n');
+      end if;
+      if acProperty != 'None'
+      then
+        set buf = concat(buf,'    <mitigating_property name="accountability" value=\"',acProperty,'\">\n      <rationale>',acRationale,'</rationale>\n    </mitigating_property>\n');
+      end if;
+      if anProperty != 'None'
+      then
+        set buf = concat(buf,'    <mitigating_property name="anonymity" value=\"',anProperty,'\">\n      <rationale>',anRationale,'</rationale>\n    </mitigating_property>\n');
+      end if;
+      if panProperty != 'None'
+      then
+        set buf = concat(buf,'    <mitigating_property name="pseudonymity" value=\"',panProperty,'\">\n      <rationale>',panRationale,'</rationale>\n    </mitigating_property>\n');
+      end if;
+      if unlProperty != 'None'
+      then
+        set buf = concat(buf,'    <mitigating_property name="unlinkability" value=\"',unlProperty,'\">\n      <rationale>',unlRationale,'</rationale>\n    </mitigating_property>\n');
+      end if;
+      if unoProperty != 'None'
+      then
+        set buf = concat(buf,'    <mitigating_property name="unobservability" value=\"',unoProperty,'\">\n      <rationale>',unoRationale,'</rationale>\n    </mitigating_property>\n');
+      end if;
+   
+      open cmRolesCursor;
+      cmRoles_loop: loop
+        fetch cmRolesCursor into roleName;
+        if done = 1
+        then
+          leave cmRoles_loop;
+        end if;
+        set buf = concat(buf,'    <responsible_role name=\"',roleName,'\" />\n');
+      end loop cmRoles_loop;
+      close cmRolesCursor;
+      set done = 0;
+
+      open cmPersonasCursor;
+      cmPersonas_loop: loop
+        fetch cmPersonasCursor into taskName,personaName,durValue,freqValue,demValue,gcValue;
+        if done = 1
+        then
+          leave cmPersonas_loop;
+        end if;
+        set buf = concat(buf,'    <responsible_persona task=\"',taskName,'\" persona=\"',personaName,'\" duration=\"',replace(durValue,' ','_'),'\" frequency=\"',replace(freqValue,' ','_'),'\" demands=\"',replace(demValue,' ','_'),'\" goals=\"',replace(gcValue,' ','_'),'\" />\n');
+      end loop cmPersonas_loop;
+      close cmPersonasCursor;
+      set done = 0;
+
+      set buf = concat(buf,'  </countermeasure_environment>\n');
+    end loop cmEnv_loop;
+    close cmEnvCursor;
+    set done = 0;
+
+    set buf = concat(buf,'</countermeasure>\n');
+  end loop cm_loop;
+  close cmCursor;
+
+  set buf = concat(buf,'</goals>');
+  select buf,dpCount,goalCount,obsCount,reqCount,ucCount,cmCount;
+end
+//
+
+create procedure templateGoalDependents(in tgId int)
+begin
+  declare cvId int;
+  declare cvName varchar(255);
+  declare done int default 0;
+  declare cvCursor cursor for select distinct cv.id, cv.name from component_view cv, component_view_component cvc, component_template_goal ctg where ctg.template_goal_id = tgId and ctg.component_id = cvc.component_id and cvc.component_view_id = cv.id;
+  declare continue handler for not found set done = 1;
+
+  open cvCursor;
+  cv_loop: loop
+    fetch cvCursor into cvId, cvName;
+    if done = 1
+    then
+      leave cv_loop;
+    end if;
+    insert into temp_component_view values(cvId,cvName);
+    call componentViewDependents(cvId);
+  end loop cv_loop;
+  close cvCursor;
+end
+//
+
+
+create procedure componentViewDependents(in cvId int)
+begin
+  declare assetId int;
+  declare assetName varchar(255);
+  declare goalId int;
+  declare goalName varchar(255);
+  declare reqId int;
+  declare reqName varchar(255);
+  declare done int default 0;
+  declare assetCursor cursor for select a.id,a.name from component_view_component cvc, component_asset_template_asset cata, asset a where cvc.component_view_id = cvId and cvc.component_id = cata.component_id and cata.asset_id = a.id;
+  declare goalCursor cursor for select g.id,g.name from component_view_component cvc, component_goal_template_goal cgtg, goal g where cvc.component_view_id = cvId and cvc.component_id = cgtg.component_id and cgtg.goal_id = g.id;
+  declare reqCursor cursor for select r.id,r.name from component_view_component cvc, component_requirement_template_requirement crtr, requirement r where cvc.component_view_id = cvId and cvc.component_id = crtr.component_id and crtr.requirement_id = r.id and r.version = (select max(i.version) from requirement i where i.id = r.id);
+
+  declare continue handler for not found set done = 1;
+
+  open assetCursor;
+  asset_loop: loop
+    fetch assetCursor into assetId, assetName;
+    if done = 1
+    then
+      leave asset_loop;
+    end if;
+    insert into temp_asset values(assetId,assetName);
+    call assetDependents(assetId);
+  end loop asset_loop;
+  close assetCursor;
+
+  set done = 0;
+
+  open goalCursor;
+  goal_loop: loop
+    fetch goalCursor into goalId, goalName;
+    if done = 1
+    then
+      leave goal_loop;
+    end if;
+    insert into temp_goal values(goalId,goalName);
+    call goalDependents(goalId);
+  end loop goal_loop;
+  close goalCursor;
+
+  set done = 0;
+
+  open reqCursor;
+  req_loop: loop
+    fetch reqCursor into reqId, reqName;
+    if done = 1
+    then
+      leave req_loop;
+    end if;
+    insert into temp_requirement values(reqId,reqName);
+    call requirementDependents(reqId);
+  end loop req_loop;
+  close reqCursor;
+
+end
+//
+
+create procedure getGoalAssociation(in envName text, in goalName text, in sgName text)
+begin
+  select id, environment,goal, goal_dim, ref_type, subgoal, subgoal_dim, alternative_id, rationale from goal_associations where environment = envName and goal = goalName and subgoal = sgName limit 1;
+end
+//
+
+create procedure obstructedRootGoals(in rgId int, in envId int)
+begin
+  declare goalId int;
+  declare goalCount int default 0;
+  declare isObstructed bool;
+  declare done int default 0;
+  declare rootGoalName varchar(100);
+  declare obsGoalName varchar(100);
+  declare opGoalCursor cursor for select goal_id from goalgoal_goalassociation where subgoal_id = rgId and environment_id = envId; 
+  declare obsGoalCursor cursor for select obstructed from temp_obstructed order by 1; 
+  declare continue handler for not found set done = 1;
+
+  open opGoalCursor;
+  og_loop: loop
+    fetch opGoalCursor into goalId;
+    if done = 1
+    then
+      leave og_loop;
+    end if;
+    call isGoalObstructed(goalId,envId,isObstructed);
+    if isObstructed = true
+    then
+      select count(goal_id) into goalCount from goalgoal_goalassociation where subgoal_id = goalId and environment_id = envId;
+      if goalCount = 0
+      then
+        select name into rootGoalName from goal where id = goalId;
+        open obsGoalCursor;
+        obsGoal_loop: loop
+          fetch obsGoalCursor into obsGoalName;
+          if done = 1
+          then
+            leave obsGoal_loop;
+          end if;
+          insert into temp_goal(root,obstructed) values (rootGoalName,obsGoalName); 
+        end loop obsGoal_loop;
+        close obsGoalCursor;
+        set done = 0;
+        delete from temp_obstructed;
+      else
+        call goalRoot(goalId,envId);
+      end if;
+    end if;
+    call obstructedRootGoals(goalId, envId);
+  end loop og_loop;
+  close opGoalCursor;
+end
+//
+
+create procedure checkDataFlowExists(in dfName text, in fromType text, in fromName text, in toType text, in toName text, in envName text)
+begin
+  declare objtCount int;
+  select count(*) into objtCount from dataflows where dataflow = dfName and environment = envName and from_name = fromName and from_type = fromType and to_name = toName and to_type = toType;
+  select objtCount;
+end
+//
+
+create procedure riskModelTags(in envName text)
+begin
+  select tag, object from riskModel_tagged where environment = envName order by 1;
+
+end
+//
+
+create procedure securityPatternClassModel(in spName text)
+begin
+  declare spId int;
+  select id into spId from securitypattern where name = spName limit 1;
+
+  select ha.name,hat.name,hm.name,a.head_role_name,a.tail_role_name,tm.name,tat.name,ta.name from securitypattern_classassociation a, template_asset ha, multiplicity_type hm, association_type hat, association_type tat, multiplicity_type tm, template_asset ta where a.pattern_id = spId and a.head_id = ha.id and a.head_multiplicity_id = hm.id and a.head_association_type_id = hat.id and a.tail_association_type_id = tat.id and a.tail_multiplicity_id = tm.id and a.tail_id = ta.id;
+end
+//
+
+create procedure conceptMapModel_all(in envName text, in reqName text)
+begin
+  if envName = 'all' and reqName = 'all'
+  then
+    select from_name,to_name,label,from_objt,to_objt from conceptMapModel_all;
+  elseif envName = 'all' and reqName != 'all'
+  then
+    select from_name,to_name,label,from_objt,to_objt from conceptMapModel_all where from_name = reqName or to_name = reqName;
+  elseif envName != 'all' and reqName = 'all'
+  then
+    select from_name,to_name,label,from_objt,to_objt from conceptMapModel_all where from_objt = envName or to_objt = envName;
+  else
+    select from_name,to_name,label,from_objt,to_objt from conceptMapModel_all where (from_name = reqName or to_name = reqName) and (from_objt = envName or to_objt = envName);
+  end if;
+end
+//
+
+create procedure assetRequirementNames(in assetName text)
+begin
+  declare assetId int;
+  select id into assetId from asset where name = assetName limit 1;
+  select r.name from requirement r,asset a, asset_requirement ar where ar.asset_id = assetId and r.id = ar.requirement_id and ar.asset_id = a.id and r.version = (select max(i.version) from requirement i where i.id = r.id) order by 1;
+end
+//
+
+create procedure environmentRequirementNames(in envName text)
+begin
+  declare environmentId int;
+  select id into environmentId from environment where name = envName limit 1;
+  select r.name from requirement r,environment e, environment_requirement er where er.environment_id = environmentId and r.id = er.requirement_id and er.environment_id = e.id and r.version = (select max(i.version) from requirement i where i.id = r.id) order by 1;
+end
+//
+
+create function hasRootObstacle(ucId int,envId int) 
+returns int
+deterministic 
+begin
+  declare obsCount int;
+
+  select count(ga2.subgoal_id) into obsCount from goalobstacle_goalassociation ga, obstacleobstacle_goalassociation ga2, usecase_step_goal_exception usge, obstacle o where usge.usecase_id = ucId and usge.environment_id = envId and usge.environment_id = ga.environment_id and ga.subgoal_id = o.id and o.originator = 'CAIRIS' and ga.subgoal_id = ga2.goal_id and ga.environment_id = ga2.environment_id;
+  if (obsCount > 0)
+  then
+    return obsCount;
+  end if; 
+
+  select count(ga2.subgoal_id) into obsCount from requirementobstacle_goalassociation ga, obstacleobstacle_goalassociation ga2, usecase_step_goal_exception usge, obstacle o where usge.usecase_id = ucId and usge.environment_id = envId and usge.environment_id = ga.environment_id and ga.subgoal_id = o.id and o.originator = 'CAIRIS' and ga.subgoal_id = ga2.goal_id and ga.environment_id = ga2.environment_id;
+  if (obsCount > 0)
+  then
+    return obsCount;
+  end if;
+
+  select count(ga2.subgoal_id) into obsCount from goalobstacle_goalassociation ga, obstaclegoal_goalassociation ga2, usecase_step_goal_exception usge, obstacle o where usge.usecase_id = ucId and usge.environment_id = envId and usge.environment_id = ga.environment_id and ga.subgoal_id = o.id and o.originator = 'CAIRIS' and ga.subgoal_id = ga2.goal_id and ga.environment_id = ga2.environment_id;
+  if (obsCount > 0)
+  then
+    return obsCount;
+  end if; 
+
+  select count(ga2.subgoal_id) into obsCount from requirementobstacle_goalassociation ga, obstaclegoal_goalassociation ga2, usecase_step_goal_exception usge, obstacle o where usge.usecase_id = ucId and usge.environment_id = envId and usge.environment_id = ga.environment_id and ga.subgoal_id = o.id and o.originator = 'CAIRIS' and ga.subgoal_id = ga2.goal_id and ga.environment_id = ga2.environment_id;
+  if (obsCount > 0)
+  then
+    return obsCount;
+  end if;
+
+  select count(ga2.subgoal_id) into obsCount from goalobstacle_goalassociation ga, obstacledomainproperty_goalassociation ga2, usecase_step_goal_exception usge, obstacle o where usge.usecase_id = ucId and usge.environment_id = envId and usge.environment_id = ga.environment_id and ga.subgoal_id = o.id and o.originator = 'CAIRIS' and ga.subgoal_id = ga2.goal_id and ga.environment_id = ga2.environment_id;
+  if (obsCount > 0)
+  then
+    return obsCount;
+  end if; 
+
+  select count(ga2.subgoal_id) into obsCount from requirementobstacle_goalassociation ga, obstacledomainproperty_goalassociation ga2, usecase_step_goal_exception usge, obstacle o where usge.usecase_id = ucId and usge.environment_id = envId and usge.environment_id = ga.environment_id and ga.subgoal_id = o.id and o.originator = 'CAIRIS' and ga.subgoal_id = ga2.goal_id and ga.environment_id = ga2.environment_id;
+  if (obsCount > 0)
+  then
+    return obsCount;
+  end if;
+
+
+  select count(ga2.subgoal_id) into obsCount from goalobstacle_goalassociation ga, obstaclerequirement_goalassociation ga2, usecase_step_goal_exception usge, obstacle o where usge.usecase_id = ucId and usge.environment_id = envId and usge.environment_id = ga.environment_id and ga.subgoal_id = o.id and o.originator = 'CAIRIS' and ga.subgoal_id = ga2.goal_id and ga.environment_id = ga2.environment_id;
+  if (obsCount > 0)
+  then
+    return obsCount;
+  end if; 
+
+  select count(ga2.subgoal_id) into obsCount from requirementobstacle_goalassociation ga, obstaclerequirement_goalassociation ga2, usecase_step_goal_exception usge, obstacle o where usge.usecase_id = ucId and usge.environment_id = envId and usge.environment_id = ga.environment_id and ga.subgoal_id = o.id and o.originator = 'CAIRIS' and ga.subgoal_id = ga2.goal_id and ga.environment_id = ga2.environment_id;
+  if (obsCount > 0)
+  then
+    return obsCount;
+  end if;
+
+  return 0;
+end
+//
+
+
+create procedure hasRootObstacles(in ucId int)
+begin
+  declare envId int;
+  declare envName varchar(200);
+  declare msgTxt varchar(1000) default '';
+  declare done int default 0;
+  declare obsCount int default 0;
+  declare envCursor cursor for select eu.environment_id,e.name from environment_usecase eu, environment e where eu.usecase_id = ucId and eu.environment_id = e.id;
+  declare continue handler for not found set done = 1;
+
+  open envCursor;
+  env_loop: loop
+    fetch envCursor into envId, envName;
+    if done = 1
+    then
+      leave env_loop;
+    end if;
+    select hasRootObstacle(ucId,envId) into obsCount;
+    if (obsCount > 0)
+    then
+      leave env_loop;
+    end if;
+  end loop env_loop;
+  close envCursor;
+
+  if (obsCount > 0)
+  then
+    select 1;
+  else
+    select 0;
+  end if;
+
+end
+//
+
+create procedure deleteGeneratedObstacles(in ucId int)
+begin
+  declare obsId int;
+  declare done int default 0;
+  declare obsCursor cursor for select distinct id from temp_rootObstacles;
+  declare continue handler for not found set done = 1;
+
+  drop table if exists temp_rootObstacles;
+  create temporary table temp_rootObstacles (id int);
+
+  insert into temp_rootObstacles (id)
+  select ga.subgoal_id from goalobstacle_goalassociation ga, usecase_step_goal_exception usge where usge.usecase_id = ucId and usge.environment_id = ga.environment_id and ga.goal_id = usge.goal_id;
+
+  insert into temp_rootObstacles (id)
+  select ga.subgoal_id from requirementobstacle_goalassociation ga, usecase_step_requirement_exception usre where usre.usecase_id = ucId and usre.environment_id = ga.environment_id and ga.goal_id = usre.goal_id;
+
+
+  open obsCursor;
+  obs_loop: loop
+    fetch obsCursor into obsId;
+    if done = 1
+    then
+      leave obs_loop;
+    end if;
+    call delete_obstacle(obsId); 
+  end loop obs_loop;
+  close obsCursor;
+end
+//
+
+create procedure patternsToXml()
+begin
+  declare arName varchar(50);
+  declare arDesc varchar(1000);
+  declare arValue int;
+  declare arRat varchar(1000);
+  declare stName varchar(50);
+  declare stDesc varchar(1000);
+  declare stValue int;
+  declare stRat varchar(1000);
+  declare assetId int;
+  declare taName varchar(50);
+  declare taShortCode varchar(20);
+  declare taAssetType varchar(50);
+  declare taSurfaceType varchar(50);
+  declare taAccessRight varchar(50);
+  declare taDesc varchar(1000);
+  declare taSig varchar(1000);
+  declare cProperty varchar(50);
+  declare iProperty varchar(50);
+  declare avProperty varchar(50);
+  declare acProperty varchar(50);
+  declare anProperty varchar(50);
+  declare panProperty varchar(50);
+  declare unlProperty varchar(50);
+  declare unoProperty varchar(50);
+  declare cRationale varchar(4000);
+  declare iRationale varchar(4000);
+  declare avRationale varchar(4000);
+  declare acRationale varchar(4000);
+  declare anRationale varchar(4000);
+  declare panRationale varchar(4000);
+  declare unlRationale varchar(4000);
+  declare unoRationale varchar(4000);
+  declare spId int;
+  declare spName varchar(50);
+  declare spContext varchar(4000);
+  declare spProblem varchar(4000);
+  declare spSolution varchar(4000);
+  declare hAsset varchar(50);
+  declare hAdorn varchar(50);
+  declare hNry varchar(50);
+  declare hRole varchar(50);
+  declare tRole varchar(50);
+  declare tNry varchar(50);
+  declare tAdorn varchar(50);
+  declare tAsset varchar(50);
+  declare trName varchar(255);
+  declare rtName varchar(50);
+  declare reqDesc varchar(4000);
+  declare reqRat varchar(255);
+  declare reqFC varchar(4000);
+  declare buf LONGTEXT default '<?xml version="1.0"?>\n<!DOCTYPE security_patterns PUBLIC "-//CAIRIS//DTD SECURITY PATTERN 1.0//EN" "http://cairis.org/dtd/security_pattern.dtd">\n\n<security_patterns>\n\n';
+  declare done int default 0;
+
+  declare accessRightCursor cursor for select name, description, value, rationale from access_right;
+  declare stCursor cursor for select name, description, value, rationale from surface_type;
+  declare taCursor cursor for select ta.id,ta.name, ta.short_code, at.name, st.name, ar.name, ta.description, ta.significance from template_asset ta, asset_type at, surface_type st, access_right ar where ta.asset_type_id = at.id and ta.surface_type_id = st.id and ta.access_right_id = ar.id;
+  declare spCursor cursor for select id,name,context,problem,solution from securitypattern;
+  declare psCursor cursor for select ha.name,hat.name,hm.name,cc.head_role_name,cc.tail_role_name,tm.name,tat.name,ta.name from securitypattern_classassociation cc, template_asset ha, template_asset ta, association_type hat, association_type tat, multiplicity_type hm, multiplicity_type tm where cc.head_id = ha.id and cc.head_association_type_id = hat.id and cc.head_multiplicity_id = hm.id and cc.tail_multiplicity_id = tm.id and cc.tail_association_type_id = tat.id and cc.tail_id = ta.id and cc.pattern_id = spId;
+  declare reqCursor cursor for select pr.name,ta.name,rt.name,pr.description,pr.rationale,pr.fit_criterion from securitypattern_requirement pr, template_asset ta, requirement_type rt where pr.pattern_id = spId and pr.asset_id = ta.id and pr.type_id = rt.id;
+  declare continue handler for not found set done = 1;
+
+  open accessRightCursor;
+  ar_loop: loop
+    fetch accessRightCursor into arName, arDesc, arValue,arRat;
+    if done = 1
+    then
+      leave ar_loop;
+    end if;
+    set buf = concat(buf,'<access_right name=\"',arName,'\" value=\"',arValue,'\" >\n  <description>',arDesc,'</description>\n  <rationale>',arRat,'</rationale>\n</access_right>\n');
+  end loop ar_loop;
+  close accessRightCursor;
+  set done = 0;
+
+  open stCursor;
+  st_loop: loop
+    fetch stCursor into stName, stDesc, stValue,stRat;
+    if done = 1
+    then
+      leave st_loop;
+    end if;
+    set buf = concat(buf,'<surface_type name=\"',stName,'\" value=\"',stValue,'\" >\n  <description>',stDesc,'</description>\n  <rationale>',stRat,'</rationale>\n</surface_type>\n');
+  end loop st_loop;
+  close stCursor;
+  set done = 0;
+  open taCursor;
+
+  ta_loop: loop
+    fetch taCursor into assetId, taName, taShortCode, taAssetType, taSurfaceType, taAccessRight, taDesc,taSig;
+    if done = 1
+    then
+      leave ta_loop;
+    end if;
+    set buf = concat(buf,'<asset name=\"',taName,'\" short_code=\"',taShortCode,'\" type=\"',taAssetType,'\" surface_type=\"',taSurfaceType,'\" access_right=\"',taAccessRight,'\" >\n  <description>',taDesc,'</description>\n  <significance>',taSig,'</significance>\n');
+    select spv.name,ap.property_rationale into cProperty,cRationale from template_asset_property ap, security_property_value spv where ap.template_asset_id = assetId and ap.property_id = 0 and ap.property_value_id = spv.id;
+    select spv.name,ap.property_rationale into iProperty,iRationale from template_asset_property ap, security_property_value spv where ap.template_asset_id = assetId and ap.property_id = 1 and ap.property_value_id = spv.id;
+    select spv.name,ap.property_rationale into avProperty,avRationale from template_asset_property ap, security_property_value spv where ap.template_asset_id = assetId and ap.property_id = 2 and ap.property_value_id = spv.id;
+    select spv.name,ap.property_rationale into acProperty,acRationale from template_asset_property ap, security_property_value spv where ap.template_asset_id = assetId and ap.property_id = 3 and ap.property_value_id = spv.id;
+    select spv.name,ap.property_rationale into anProperty,anRationale from template_asset_property ap, security_property_value spv where ap.template_asset_id = assetId and ap.property_id = 4 and ap.property_value_id = spv.id;
+    select spv.name,ap.property_rationale into panProperty,panRationale from template_asset_property ap, security_property_value spv where ap.template_asset_id = assetId and ap.property_id = 5 and ap.property_value_id = spv.id;
+    select spv.name,ap.property_rationale into unlProperty,unlRationale from template_asset_property ap, security_property_value spv where ap.template_asset_id = assetId and ap.property_id = 6 and ap.property_value_id = spv.id;
+    select spv.name,ap.property_rationale into unoProperty,unoRationale from template_asset_property ap, security_property_value spv where ap.template_asset_id = assetId and ap.property_id = 7 and ap.property_value_id = spv.id;
+    if cProperty != 'None'
+    then
+      set buf = concat(buf,'  <security_property property="confidentiality" value=\"',cProperty,'\">\n    <rationale>',cRationale,'</rationale>\n  </security_property>\n');
+    end if;
+    if iProperty != 'None'
+    then
+      set buf = concat(buf,'  <security_property property="integrity" value=\"',iProperty,'\">\n    <rationale>',iRationale,'</rationale>\n  </security_property>\n');
+    end if;
+    if avProperty != 'None'
+    then
+      set buf = concat(buf,'  <security_property property="availability" value=\"',avProperty,'\">\n    <rationale>',avRationale,'</rationale>\n  </security_property>\n');
+    end if;
+    if acProperty != 'None'
+    then
+      set buf = concat(buf,'  <security_property property="accountability" value=\"',acProperty,'\">\n    <rationale>',acRationale,'</rationale>\n  </security_property>\n');
+    end if;
+    if anProperty != 'None'
+    then
+      set buf = concat(buf,'  <security_property property="anonymity" value=\"',anProperty,'\">\n    <rationale>',anRationale,'</rationale>\n  </security_property>\n');
+    end if;
+    if panProperty != 'None'
+    then
+      set buf = concat(buf,'  <security_property property="pseudonymity" value=\"',panProperty,'\">\n    <rationale>',panRationale,'</rationale>\n  </security_property>\n');
+    end if;
+    if unlProperty != 'None'
+    then
+      set buf = concat(buf,'  <security_property property="unlinkability" value=\"',unlProperty,'\">\n    <rationale>',unlRationale,'</rationale>\n  </security_property>\n');
+    end if;
+    if unoProperty != 'None'
+    then
+      set buf = concat(buf,'  <security_property property="unobservability" value=\"',unoProperty,'\">\n    <rationale>',unoRationale,'</rationale>\n  </security_property>\n');
+    end if;
+    set buf = concat(buf,'</asset>\n');
+  end loop ta_loop;
+  close taCursor;
+  set done = 0;
+
+  open spCursor;
+  sp_loop: loop
+    fetch spCursor into spId, spName, spContext, spProblem, spSolution;
+    if done = 1
+    then
+      leave sp_loop;
+    end if;
+    set buf = concat(buf,'<pattern name=\"',spName,'\" >\n  <context>',spContext,'</context>\n  <problem>',spProblem,'</problem>\n  <solution>',spSolution,'</solution>\n');
+
+    open psCursor;
+    ps_loop: loop
+      fetch psCursor into hAsset,hAdorn,hNry,hRole,tRole,tNry,tAdorn,tAsset;
+       if done = 1
+       then
+         leave ps_loop;
+       end if;
+
+       if hNry = '*'
+       then
+         set hNry = 'a';
+       end if;
+       if hNry = '1..*'
+       then
+         set hNry = '1..a';
+       end if;
+
+       if tNry = '*'
+       then
+         set tNry = 'a';
+       end if;
+       if tNry = '1..*'
+       then
+         set tNry = '1..a';
+       end if;
+
+       set buf = concat(buf,'  <structure head_asset=\"',hAsset,'\" head_adornment=\"',hAdorn,'\" head_nry=\"',hNry,'\" head_role=\"',hRole,'\" tail_role=\"',tRole,'\" tail_nry=\"',tNry,'\" tail_adornment=\"',tAdorn,'\" tail_asset=\"',tAsset,'\" />\n');
+    end loop ps_loop;
+    close psCursor;
+    set done = 0;
+
+    open reqCursor;
+    req_loop: loop
+      fetch reqCursor into trName,taName,rtName,reqDesc,reqRat,reqFC;
+       if done = 1
+       then
+         leave req_loop;
+       end if;
+       set buf = concat(buf,'  <requirement name=\"',trName,'\" asset=\"',taName,'\" type=\"',rtName,'\" >\n    <description>',reqDesc,'</description>\n    <rationale>',reqRat,'</rationale>\n    <fit_criterion>',reqFC,'</fit_criterion>\n  </requirement>\n');
+    end loop req_loop;
+    close reqCursor;
+    set done = 0;
+
+    set buf = concat(buf,'</pattern>\n');
+  end loop sp_loop;
+  close spCursor;
+  set done = 0;
+
+
+  set buf = concat(buf,'\n\n</security_patterns>');
+  select buf;
+end
+//
+
+create procedure inheritanceInconsistency(in environmentId int)
+begin
+  declare headAssetId int;
+  declare headAsset varchar(100);
+  declare headAssetType varchar(50);
+  declare tailAssetId int;
+  declare tailAsset varchar(100);
+  declare tailAssetType varchar(50);
+  declare propertyName varchar(50);
+  declare headPropertyValue int;
+  declare headValueName varchar(50);
+  declare tailPropertyValue int;
+  declare tailValueName varchar(50);
+  declare done int default 0;
+  declare assocCursor cursor for select a.head_id, ha.name, haty.name, a.tail_id, ta.name, taty.name from classassociation a, asset ha, asset ta, asset_type haty, asset_type taty where a.environment_id = environmentId and a.head_id = ha.id and a.tail_id = ta.id and ha.asset_type_id = haty.id and ta.asset_type_id = taty.id and a.head_association_type_id = 3;
+  declare propCursor cursor for select sp.name,hap.property_value_id,hv.name,tap.property_value_id,tv.name from security_property sp,asset_property hap, asset_property tap, security_property_value hv, security_property_value tv where hap.asset_id = headAssetId and tap.asset_id = tailAssetId and hap.property_id = sp.id and tap.property_id = hap.property_id and hap.environment_id = environmentId and hap.environment_id = tap.environment_id and hap.property_value_id = hv.id and tap.property_value_id = tv.id order by hap.property_id;
+
+  declare continue handler for not found set done = 1;
+
+  open assocCursor;
+  assoc_loop: loop
+    fetch assocCursor into headAssetId,headAsset,headAssetType,tailAssetId,tailAsset,tailAssetType;
+    if done = 1
+    then
+      leave assoc_loop;
+    end if;
+
+    if (headAssetType != tailAssetType)
+    then
+      insert into temp_vout(label,message) values('Inherited asset type',concat(tailAsset, ' is a type of ',headAsset,', but ',headAsset,' is ', headAssetType,' whereas ',tailAsset,' is ',tailAssetType,'.'));
+    end if;
+
+    open propCursor;
+    prop_loop: loop
+      fetch propCursor into propertyName,headPropertyValue,headValueName,tailPropertyValue,tailValueName;
+      if done = 1
+      then
+        leave prop_loop;
+      end if;
+      if (headPropertyValue > tailPropertyValue)
+      then
+        insert into temp_vout(label,message) values('Inherited asset inconsistency',concat(tailAsset, ' is a type of ',headAsset,', but ',headAsset,' has a ', propertyName,' value of ',headValueName,' whereas ',tailAsset,' has a weaker value of ',tailValueName,'.'));
+      end if;
+
+    end loop prop_loop;
+    close propCursor;
+    set done = 0;
+
+  end loop assoc_loop;
+  close assocCursor;
+end
+//
+
+create function isClassAssociationPresent(envName text,headName text, tailName text)
+returns int
+deterministic
+begin
+  declare envId int;
+  declare headId int;
+  declare tailId int;
+  declare assocCount int;
+
+  select id into envId from environment where name = envName limit 1;
+  select id into headId from asset where name = headName limit 1;
+  select id into tailId from asset where name = tailName limit 1;
+
+  select count(id) into assocCount from classassociation where environment_id = envId and head_id = headId and tail_id = tailId;
+  return assocCount;
+end
+//
+
+create procedure isTracePresent(in fromObjt text,in fromName text, in toObjt text, in toName text)
+begin
+  declare fromId int;
+  declare toId int;
+  declare fromIdSql varchar(4000);
+  declare toIdSql varchar(4000);
+  declare traceSql varchar(4000);
+  declare traceCount int;
+
+  if fromObjt = 'requirement'
+  then
+    select o.id into fromId from requirement o where o.name = fromName and o.version = (select max(i.version) from requirement i where i.id = o.id);
+  else
+    set fromIdSql = concat('select id into @fromId from ',fromObjt,' where name = "',fromName,'" limit 1');
+    set @sql = fromIdSql;
+    prepare stmt from @sql;
+    execute stmt;
+    deallocate prepare stmt;
+    set fromId = @fromId;
+  end if;
+
+  if toObjt = 'requirement'
+  then
+    select o.id into toId from requirement o where o.name = toName and o.version = (select max(i.version) from requirement i where i.id = o.id);
+  else
+    set toIdSql = concat('select id into @toId from ',toObjt,' where name = "',toName,'" limit 1');
+    set @sql = toIdSql;
+    prepare stmt from @sql;
+    execute stmt;
+    deallocate prepare stmt;
+    set toId = @toId;
+  end if;
+
+  if fromObjt = 'requirement' and toObjt = 'requirement'
+  then
+    set traceSql = concat('select count(*) into @traceCount from requirement_requirement where from_id = ',ifnull(fromId,-1),' and to_id = ',ifnull(toId,-1));
+  else
+    set traceSql = concat('select count(*) into @traceCount from ',fromObjt,'_',toObjt,' where ',fromObjt,'_id = ',ifnull(fromId,-1),' and ',toObjt,'_id = ',ifnull(toId,-1));
+  end if;
+
+  set @sql = traceSql;
+  prepare stmt from @sql;
+  execute stmt;
+  deallocate prepare stmt;
+  set traceCount = @traceCount;
+  select traceCount;
+end
+//
 
 delimiter ;

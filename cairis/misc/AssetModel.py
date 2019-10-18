@@ -19,6 +19,7 @@
 from cairis.core.Borg import Borg
 import pydot
 from cairis.core.colourcodes import surfaceTypeColourCode,surfaceTypeTextColourCode
+from cairis.core.colourcodes import vulnerabilitySeverityColourCode,vulnerabilitySeverityTextColourCode
 import os
 
 __author__ = 'Shamal Faily, Robin Quetin'
@@ -54,12 +55,12 @@ class AssetModel:
     if (dimName == 'persona'):
       objt = self.dbProxy.dimensionObject(objtName,'persona')
       b = Borg()
-      actorFile = b.staticDir + '/assets/modelActor.png'
+      actorFile = b.assetDir + '/modelActor.png'
       if (objt.assumption() == True):
         objtLabel = "&lt;&lt;Assumption&gt;&gt;" + objtName
-        self.theGraph.add_node(pydot.Node(objtName,label=objtLabel,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
+        self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtLabel,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
       else:
-        self.theGraph.add_node(pydot.Node(objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
+        self.theGraph.add_node(pydot.Node(objtName,label='',xlabel=objtName,shapefile=actorFile,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl,peripheries='0'))
     elif (dimName == 'goalconcern' or dimName == 'taskconcern'):
       self.theGraph.add_node(pydot.Node(objtName,shape='note',margin=0,fontname=self.fontName,fontsize=self.fontSize,fontcolor='blue',color='blue',URL=objtUrl))
     elif (dimName == 'obstacleconcern'):
@@ -73,7 +74,9 @@ class AssetModel:
         stValue,arValue = self.dbProxy.templateAssetMetrics(objtName)
         assetNode = pydot.Node(objtName,shape='record',style='filled',margin=0,fillcolor=surfaceTypeColourCode(stValue / arValue),fontcolor=surfaceTypeTextColourCode(stValue / arValue),fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl)
       else:
-        assetNode = pydot.Node(objtName,shape='record',margin=0,color=borderColour,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl)
+        asMetric = self.dbProxy.assetAttackSurface(objtName,self.theEnvironmentName)
+        assetNode = pydot.Node(objtName,shape='record',style='filled',margin=0,colorscheme='orrd4',color='black',fillcolor=vulnerabilitySeverityColourCode(asMetric),fontcolor=vulnerabilitySeverityTextColourCode(asMetric),fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl)
+#        assetNode = pydot.Node(objtName,shape='record',margin=0,color=borderColour,fontname=self.fontName,fontsize=self.fontSize,URL=objtUrl)
       self.theGraph.add_node(assetNode)
     self.nodeList.add(objtName)
 
